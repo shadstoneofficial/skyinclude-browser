@@ -69,7 +69,14 @@ class SkyIncludeBrowser {
         // Show window when ready
         this.mainWindow.once('ready-to-show', () => {
             this.mainWindow.show();
+            this.updateCurrentViewBounds();
         });
+
+        this.mainWindow.on('resize', () => this.updateCurrentViewBounds());
+        this.mainWindow.on('maximize', () => this.updateCurrentViewBounds());
+        this.mainWindow.on('unmaximize', () => this.updateCurrentViewBounds());
+        this.mainWindow.on('enter-full-screen', () => this.updateCurrentViewBounds());
+        this.mainWindow.on('leave-full-screen', () => this.updateCurrentViewBounds());
 
         // Create initial tab with home page
         await this.createNewTab('skyinclude://home');
@@ -168,15 +175,7 @@ class SkyIncludeBrowser {
         this.currentView = tab.view;
         this.activeTabId = tabId;
         this.mainWindow.addBrowserView(this.currentView);
-
-        // Update view bounds (below the UI)
-        const bounds = this.mainWindow.getBounds();
-        this.currentView.setBounds({
-            x: 0,
-            y: 120, // Space for address bar and tabs
-            width: bounds.width,
-            height: bounds.height - 120
-        });
+        this.updateCurrentViewBounds();
 
         // Update UI
         this.mainWindow.webContents.send('tab-switched', {
@@ -186,6 +185,21 @@ class SkyIncludeBrowser {
             canGoBack: tab.canGoBack,
             canGoForward: tab.canGoForward,
             loading: tab.loading
+        });
+    }
+
+    updateCurrentViewBounds() {
+        if (!this.mainWindow || !this.currentView) {
+            return;
+        }
+
+        const topChromeHeight = 120;
+        const [width, height] = this.mainWindow.getContentSize();
+        this.currentView.setBounds({
+            x: 0,
+            y: topChromeHeight,
+            width,
+            height: Math.max(0, height - topChromeHeight)
         });
     }
 
