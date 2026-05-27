@@ -14,11 +14,12 @@ It runs on:
 Each platform job runs:
 
 1. `npm ci`
-2. `npm test`
-3. The platform build script from `package.json`
-4. SHA256 checksum generation
-5. GitHub artifact attestation generation from `dist/SHA256SUMS.txt`
-6. Artifact upload
+2. `npm audit --audit-level=high`
+3. `npm test`
+4. The platform build script from `package.json`
+5. SHA256 checksum generation
+6. GitHub artifact attestation generation from `dist/SHA256SUMS.txt`
+7. Artifact upload
 
 Expected artifacts:
 
