@@ -18,7 +18,7 @@ class HNSResolver {
             dohResolver: 'https://hnsdoh.com/dns-query',
             headlessLookupBase: 'https://headlessdomains.com/api/v1/lookup/',
             timeout: 10000,
-            enableDANE: true
+            enableDANE: false
         };
 
         this.cache = new Map();
@@ -39,7 +39,7 @@ class HNSResolver {
             dohResolver: dohResolver || this.settings.dohResolver,
             headlessLookupBase: this.settings.headlessLookupBase,
             timeout: this.settingsManager.getSetting('hnsTimeout') || this.settings.timeout,
-            enableDANE: this.settingsManager.getSetting('hnsDANE') !== false
+            enableDANE: this.settingsManager.getSetting('hnsDANE') === true
         };
     }
 
