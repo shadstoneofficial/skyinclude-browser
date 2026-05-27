@@ -336,7 +336,7 @@ class SkyIncludeRenderer {
 
     // Tab UI rendering
     renderTabs(tabs) {
-        this.tabsContainer.innerHTML = '';
+        this.tabsContainer.replaceChildren();
         this.tabs.clear();
         
         tabs.forEach(tab => {
@@ -349,14 +349,24 @@ class SkyIncludeRenderer {
         const tabElement = document.createElement('div');
         tabElement.className = `tab ${tab.active ? 'active' : ''}`;
         tabElement.dataset.tabId = tab.id;
-        
-        tabElement.innerHTML = `
-            <div class="tab-favicon">
-                <i class="fas fa-globe"></i>
-            </div>
-            <div class="tab-title">${this.getTabTitle(tab)}</div>
-            <button class="tab-close" title="Close tab">×</button>
-        `;
+
+        const favicon = document.createElement('div');
+        favicon.className = 'tab-favicon';
+
+        const faviconIcon = document.createElement('i');
+        faviconIcon.className = 'fas fa-globe';
+        favicon.appendChild(faviconIcon);
+
+        const title = document.createElement('div');
+        title.className = 'tab-title';
+        title.textContent = this.getTabTitle(tab);
+
+        const closeBtn = document.createElement('button');
+        closeBtn.className = 'tab-close';
+        closeBtn.title = 'Close tab';
+        closeBtn.textContent = '×';
+
+        tabElement.append(favicon, title, closeBtn);
         
         // Tab click handler
         tabElement.addEventListener('click', (e) => {
@@ -366,7 +376,6 @@ class SkyIncludeRenderer {
         });
         
         // Close button handler
-        const closeBtn = tabElement.querySelector('.tab-close');
         closeBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             this.closeTab(tab.id);
@@ -487,32 +496,59 @@ class SkyIncludeRenderer {
     }
 
     renderHistory(history) {
+        this.historyList.replaceChildren();
+
         if (!history || history.length === 0) {
-            this.historyList.innerHTML = '<div class="empty-state">No browsing history</div>';
+            const emptyState = document.createElement('div');
+            emptyState.className = 'empty-state';
+            emptyState.textContent = 'No browsing history';
+            this.historyList.appendChild(emptyState);
             return;
         }
-        
-        this.historyList.innerHTML = history.map(entry => `
-            <div class="history-item" data-url="${entry.url}">
-                <div class="history-favicon">
-                    <i class="fas fa-globe"></i>
-                </div>
-                <div class="history-content">
-                    <div class="history-title">${entry.title || entry.url}</div>
-                    <div class="history-url">${entry.url}</div>
-                </div>
-                <div class="history-time">${this.formatTime(entry.timestamp)}</div>
-            </div>
-        `).join('');
-        
-        // Add click handlers
-        this.historyList.querySelectorAll('.history-item').forEach(item => {
+
+        const fragment = document.createDocumentFragment();
+
+        history.forEach(entry => {
+            const entryUrl = entry.url;
+            const item = document.createElement('div');
+            item.className = 'history-item';
+            item.dataset.url = entryUrl;
+
+            const favicon = document.createElement('div');
+            favicon.className = 'history-favicon';
+
+            const faviconIcon = document.createElement('i');
+            faviconIcon.className = 'fas fa-globe';
+            favicon.appendChild(faviconIcon);
+
+            const content = document.createElement('div');
+            content.className = 'history-content';
+
+            const title = document.createElement('div');
+            title.className = 'history-title';
+            title.textContent = entry.title || entryUrl;
+
+            const urlElement = document.createElement('div');
+            urlElement.className = 'history-url';
+            urlElement.textContent = entryUrl;
+
+            content.append(title, urlElement);
+
+            const time = document.createElement('div');
+            time.className = 'history-time';
+            time.textContent = this.formatTime(entry.timestamp);
+
+            item.append(favicon, content, time);
+
             item.addEventListener('click', () => {
-                const url = item.dataset.url;
-                this.navigateToUrl(url);
+                this.navigateToUrl(entryUrl);
                 this.hideModal('history-modal');
             });
+
+            fragment.appendChild(item);
         });
+
+        this.historyList.appendChild(fragment);
     }
 
     formatTime(timestamp) {
@@ -617,9 +653,9 @@ class SkyIncludeRenderer {
         });
         
         // Clear sections
-        document.getElementById('answer-section').innerHTML = '';
-        document.getElementById('authority-section').innerHTML = '';
-        document.getElementById('additional-section').innerHTML = '';
+        document.getElementById('answer-section').replaceChildren();
+        document.getElementById('authority-section').replaceChildren();
+        document.getElementById('additional-section').replaceChildren();
     }
 
     async performDnsQuery() {
@@ -640,7 +676,7 @@ class SkyIncludeRenderer {
 
         // Disable query button and show loading
         this.queryBtn.disabled = true;
-        this.queryBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> QUERYING...';
+        this.setIconButtonText(this.queryBtn, 'fas fa-spinner fa-spin', 'QUERYING...');
         
         document.getElementById('result-status').textContent = 'Querying...';
 
@@ -662,13 +698,16 @@ class SkyIncludeRenderer {
             document.getElementById('result-rcode').textContent = 'SERVFAIL';
             
             // Show error in answer section
-            document.getElementById('answer-section').innerHTML = 
-                `<div class="dns-record" style="color: #ef4444;">Error: ${error.message}</div>`;
+            const errorRecord = document.createElement('div');
+            errorRecord.className = 'dns-record';
+            errorRecord.style.color = '#ef4444';
+            errorRecord.textContent = `Error: ${error.message}`;
+            document.getElementById('answer-section').replaceChildren(errorRecord);
             
         } finally {
             // Re-enable query button
             this.queryBtn.disabled = false;
-            this.queryBtn.innerHTML = '<i class="fas fa-search"></i> QUERY';
+            this.setIconButtonText(this.queryBtn, 'fas fa-search', 'QUERY');
         }
     }
 
@@ -718,23 +757,34 @@ class SkyIncludeRenderer {
 
     displayDnsSection(elementId, records, type) {
         const element = document.getElementById(elementId);
+        element.replaceChildren();
         
         if (!records || records.length === 0) {
-            element.innerHTML = '';
             return;
         }
 
-        element.innerHTML = records.map(record => {
-            const isHighlighted = type === 'answer' && record.data && 
-                                  (record.data.includes('34.234.248.146') || 
-                                   record.data.includes('setup.skyinclude'));
+        const fragment = document.createDocumentFragment();
+
+        records.forEach(record => {
+            const recordData = String(record.data || '');
+            const isHighlighted = type === 'answer' && recordData && 
+                                  (recordData.includes('34.234.248.146') || 
+                                   recordData.includes('setup.skyinclude'));
             
-            const recordClass = isHighlighted ? 'dns-record ' + type + ' record-highlight' : 'dns-record ' + type;
+            const recordElement = document.createElement('div');
+            recordElement.className = isHighlighted ? 'dns-record ' + type + ' record-highlight' : 'dns-record ' + type;
+            recordElement.textContent = `${record.name || ''}. ${record.TTL || ''} ${record.type || ''} ${recordData}`;
             
-            return `<div class="${recordClass}">
-                ${record.name}. ${record.TTL} ${record.type} ${record.data}
-            </div>`;
-        }).join('');
+            fragment.appendChild(recordElement);
+        });
+
+        element.appendChild(fragment);
+    }
+
+    setIconButtonText(button, iconClass, text) {
+        const icon = document.createElement('i');
+        icon.className = iconClass;
+        button.replaceChildren(icon, document.createTextNode(` ${text}`));
     }
 
     getRCodeText(code) {
