@@ -7,7 +7,9 @@ on:
       - "v*"
 
 permissions:
+  attestations: write
   contents: read
+  id-token: write
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -76,6 +78,11 @@ jobs:
           fs.writeFileSync('SHA256SUMS.txt', `${lines.join('\n')}\n`);
           NODE
           cat SHA256SUMS.txt
+
+      - name: Attest release artifacts
+        uses: actions/attest@v4
+        with:
+          subject-checksums: dist/SHA256SUMS.txt
 
       - name: Upload release artifacts
         uses: actions/upload-artifact@v4
