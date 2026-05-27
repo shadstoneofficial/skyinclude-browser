@@ -188,6 +188,25 @@ body {
     color: #fbbc04;
 }
 
+.hosting-indicator {
+    align-items: center;
+    background-color: #fff;
+    border: 1px solid #d1d5db;
+    border-radius: 999px;
+    color: #374151;
+    display: inline-flex;
+    flex-shrink: 0;
+    font-size: 12px;
+    gap: 4px;
+    line-height: 1;
+    margin-right: 8px;
+    padding: 4px 8px;
+}
+
+.hosting-indicator i {
+    font-size: 13px;
+}
+
 .address-bar {
     flex: 1;
     border: none;
