@@ -347,7 +347,7 @@ class SkyIncludeBrowser {
             
             // Check if it's potentially an HNS domain
             if (this.isHNSDomain(hostname)) {
-                console.log('Attempting HNS resolution for:', hostname);
+                console.log('Attempting HNS resolution');
                 
                 // Try HNS resolution
                 const hnsResult = await this.resolveHNS(hostname);
@@ -555,10 +555,41 @@ class SkyIncludeBrowser {
             if (!fs.existsSync(dir)) {
                 fs.mkdirSync(dir, { recursive: true });
             }
-            fs.appendFileSync(this.logFile, `${new Date().toISOString()} ${event} ${JSON.stringify(data)}\n`);
+            fs.appendFileSync(this.logFile, `${new Date().toISOString()} ${event} ${JSON.stringify(this.redactLogData(data))}\n`);
         } catch (error) {
             console.error('Failed to write SkyInclude log:', error);
         }
+    }
+
+    redactLogData(value) {
+        const sensitiveKeys = new Set([
+            'address',
+            'domain',
+            'finalUrl',
+            'hnsHost',
+            'host',
+            'hostname',
+            'inputUrl',
+            'navigationUrl',
+            'path',
+            'proxyForHns',
+            'proxyHost',
+            'resolvedHost',
+            'url'
+        ]);
+
+        if (Array.isArray(value)) {
+            return value.map(item => this.redactLogData(item));
+        }
+
+        if (value && typeof value === 'object') {
+            return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+                key,
+                sensitiveKeys.has(key) ? '[redacted]' : this.redactLogData(item)
+            ]));
+        }
+
+        return value;
     }
 
     async startHnsProxy() {
