@@ -66,7 +66,7 @@ class HistoryManager {
         }
 
         this.saveHistory();
-        console.log('Added history entry:', entry);
+        console.log('Added history entry');
     }
 
     extractTitleFromUrl(url) {
@@ -102,7 +102,7 @@ class HistoryManager {
         
         if (this.history.length < initialLength) {
             this.saveHistory();
-            console.log('Removed history entry:', url);
+            console.log('Removed history entry');
             return true;
         }
         
