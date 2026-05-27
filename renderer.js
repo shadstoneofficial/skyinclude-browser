@@ -20,6 +20,7 @@ class SkyIncludeRenderer {
         this.addressBar = document.getElementById('address-bar');
         this.loadingIndicator = document.getElementById('loading-indicator');
         this.securityIndicator = document.getElementById('security-indicator');
+        this.hostingIndicator = document.getElementById('hosting-indicator');
         
         // Tab elements
         this.tabsContainer = document.getElementById('tabs-container');
@@ -275,6 +276,7 @@ class SkyIncludeRenderer {
         this.updateNavigationButtons(data.canGoBack, data.canGoForward);
         this.showLoading(data.loading);
         this.updateSecurityIndicator(data.url);
+        this.updateHostingIndicator(data.hostingProvider);
     }
 
     updateAddressBar(url) {
@@ -293,6 +295,10 @@ class SkyIncludeRenderer {
             if (!data.loading && data.url) {
                 this.updateAddressBar(data.url);
                 this.updateNavigationButtons(data.canGoBack, data.canGoForward);
+            }
+
+            if (Object.prototype.hasOwnProperty.call(data, 'hostingProvider')) {
+                this.updateHostingIndicator(data.hostingProvider);
             }
         }
         
@@ -320,6 +326,15 @@ class SkyIncludeRenderer {
             icon.className = 'fas fa-globe';
             this.securityIndicator.className = 'security-indicator';
         }
+    }
+
+    updateHostingIndicator(hostingProvider) {
+        if (hostingProvider === 'github-pages') {
+            this.hostingIndicator.classList.remove('hidden');
+            return;
+        }
+
+        this.hostingIndicator.classList.add('hidden');
     }
 
     showLoading(loading) {

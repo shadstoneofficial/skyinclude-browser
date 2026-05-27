@@ -23,6 +23,12 @@ class SkyIncludeBrowser {
         this.hnsProxyPort = null;
         this.hnsProxyServer = null;
         this.proxyConfiguredSessions = new WeakSet();
+        this.githubPagesAddresses = new Set([
+            '185.199.108.153',
+            '185.199.109.153',
+            '185.199.110.153',
+            '185.199.111.153'
+        ]);
         this.logFile = path.join(app.getPath('userData'), 'skyinclude-debug.log');
         
         // Initialize managers
@@ -159,7 +165,8 @@ class SkyIncludeBrowser {
             title: 'New Tab',
             loading: false,
             canGoBack: false,
-            canGoForward: false
+            canGoForward: false,
+            hostingProvider: null
         });
 
         this.switchToTab(tabId);
@@ -190,7 +197,8 @@ class SkyIncludeBrowser {
             title: tab.title,
             canGoBack: tab.canGoBack,
             canGoForward: tab.canGoForward,
-            loading: tab.loading
+            loading: tab.loading,
+            hostingProvider: tab.hostingProvider
         });
     }
 
@@ -240,7 +248,8 @@ class SkyIncludeBrowser {
 
         try {
             tab.loading = true;
-            this.mainWindow.webContents.send('loading-changed', { tabId, loading: true });
+            tab.hostingProvider = null;
+            this.mainWindow.webContents.send('loading-changed', { tabId, loading: true, hostingProvider: null });
 
             let finalUrl = inputUrl;
             let loadOptions = {};
@@ -255,6 +264,7 @@ class SkyIncludeBrowser {
                 finalUrl = resolved.url || resolved;
                 loadOptions = resolved.options || {};
                 tab.displayUrl = resolved.displayUrl || inputUrl;
+                tab.hostingProvider = resolved.hostingProvider || null;
 
                 if (resolved.proxyHost && resolved.resolvedHost) {
                     this.hnsProxyHosts.set(resolved.proxyHost, resolved.resolvedHost);
@@ -303,7 +313,8 @@ class SkyIncludeBrowser {
                 loading: false,
                 url: tab.url,
                 canGoBack: tab.canGoBack,
-                canGoForward: tab.canGoForward
+                canGoForward: tab.canGoForward,
+                hostingProvider: tab.hostingProvider
             });
 
             // Add to history
@@ -394,18 +405,25 @@ class SkyIncludeBrowser {
             const parsedUrl = new URL(this.normalizeGatewayUrl(navigationUrl));
             if (parsedUrl.protocol === 'file:' && parsedUrl.pathname.endsWith('/announcement.html')) {
                 tab.url = 'skyinclude://home';
+                tab.hostingProvider = null;
                 this.mainWindow.webContents.send('loading-changed', {
                     tabId,
                     loading: false,
                     url: tab.url,
                     canGoBack: tab.view.webContents.canGoBack(),
-                    canGoForward: tab.view.webContents.canGoForward()
+                    canGoForward: tab.view.webContents.canGoForward(),
+                    hostingProvider: tab.hostingProvider
                 });
                 return;
             }
 
             if (this.isIPAddress(parsedUrl.hostname)) {
+                tab.hostingProvider = null;
                 return;
+            }
+
+            if (!this.isHNSDomain(parsedUrl.hostname)) {
+                tab.hostingProvider = null;
             }
 
             tab.url = parsedUrl.toString().replace(/^http:\/\//, '');
@@ -414,7 +432,8 @@ class SkyIncludeBrowser {
                 loading: false,
                 url: tab.url,
                 canGoBack: tab.view.webContents.canGoBack(),
-                canGoForward: tab.view.webContents.canGoForward()
+                canGoForward: tab.view.webContents.canGoForward(),
+                hostingProvider: tab.hostingProvider
             });
         } catch (error) {
             this.log('navigation-url-update-error', { tabId, navigationUrl, message: error.message });
@@ -497,13 +516,14 @@ class SkyIncludeBrowser {
 
     buildHNSNavigation(originalUrl, resolution) {
         const parsedUrl = new URL(originalUrl);
+        const hostingProvider = this.getHostingProviderForResolution(resolution);
 
         if (typeof resolution === 'string') {
             return { url: resolution };
         }
 
         if (resolution.url && !resolution.address) {
-            return { url: resolution.url };
+            return { url: resolution.url, hostingProvider };
         }
 
         if (resolution.address) {
@@ -515,12 +535,13 @@ class SkyIncludeBrowser {
                 hnsHostHeader: resolution.domain,
                 proxyHost: resolution.domain,
                 resolvedHost: resolution.address,
-                bypassCache: true
+                bypassCache: true,
+                hostingProvider
             };
         }
 
         if (resolution.url) {
-            return { url: resolution.url };
+            return { url: resolution.url, hostingProvider };
         }
 
         throw new Error(`No browsable HNS records found for ${resolution.domain}`);
@@ -536,8 +557,22 @@ class SkyIncludeBrowser {
             displayUrl: `${parsedUrl.hostname}${parsedUrl.pathname}${parsedUrl.search}${parsedUrl.hash}`,
             hnsHostHeader: parsedUrl.hostname,
             proxyHost: parsedUrl.hostname,
+            hostingProvider: null,
             bypassCache: true
         };
+    }
+
+    getHostingProviderForResolution(resolution) {
+        if (!resolution || typeof resolution !== 'object') {
+            return null;
+        }
+
+        const addresses = [
+            resolution.address,
+            ...(Array.isArray(resolution.records?.A) ? resolution.records.A : [])
+        ].filter(Boolean);
+
+        return addresses.some(address => this.githubPagesAddresses.has(address)) ? 'github-pages' : null;
     }
 
     addToHistory(url, title) {
@@ -1042,6 +1077,7 @@ class SkyIncludeBrowser {
                 url: tab.url,
                 title: tab.title,
                 loading: tab.loading,
+                hostingProvider: tab.hostingProvider,
                 active: tab.id === this.activeTabId
             }));
         });
