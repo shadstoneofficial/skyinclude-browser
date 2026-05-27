@@ -270,9 +270,9 @@
 
                 <div class="setting-group">
                     <label class="setting-label">
-                        <input type="checkbox" id="hnsDANE"> Enable DANE Verification for HNS
+                        <input type="checkbox" id="hnsDANE"> Enable Optional DANE Verification for HNS
                     </label>
-                    <p class="setting-description">Use DNS-based authentication for HNS domains</p>
+                    <p class="setting-description">Use DNS-based authentication only for HNS domains that publish compatible records</p>
                 </div>
 
                 <div class="setting-group">
@@ -337,7 +337,7 @@
             document.getElementById('hnsTimeout').value = settings.hnsTimeout || 15000;
             document.getElementById('blockTrackers').checked = settings.blockTrackers !== false;
             document.getElementById('doNotTrack').checked = settings.doNotTrack !== false;
-            document.getElementById('hnsDANE').checked = settings.hnsDANE !== false;
+            document.getElementById('hnsDANE').checked = settings.hnsDANE === true;
             document.getElementById('hnsFallbackToDNS').checked = settings.hnsFallbackToDNS !== false;
             document.getElementById('homepage').value = settings.homepage || 'skyinclude://home';
             document.getElementById('searchEngine').value = settings.searchEngine || 'https://duckduckgo.com/?q=%s';

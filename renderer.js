@@ -589,7 +589,7 @@ class SkyIncludeRenderer {
         
         // Security settings
         document.getElementById('strict-ssl').checked = settings.strictSSL !== false;
-        document.getElementById('hns-dane').checked = settings.hnsDANE !== false;
+        document.getElementById('hns-dane').checked = settings.hnsDANE === true;
     }
 
     async saveSettings() {
@@ -616,7 +616,7 @@ class SkyIncludeRenderer {
         document.getElementById('block-trackers').checked = true;
         document.getElementById('disable-javascript').checked = true;
         document.getElementById('strict-ssl').checked = true;
-        document.getElementById('hns-dane').checked = true;
+        document.getElementById('hns-dane').checked = false;
     }
 
     // Developer tools

@@ -13,7 +13,7 @@ class SettingsManager {
             ],
             hnsCustomResolver: '',
             hnsTimeout: 15000,
-            hnsDANE: true,
+            hnsDANE: false,
             hnsFallbackToDNS: true,
             
             // Privacy
