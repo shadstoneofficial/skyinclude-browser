@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SkyInclude Browser Settings</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f5f5f5;
+            color: #333;
+            line-height: 1.6;
+        }
+        
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        
+        .header {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        
+        .header h1 {
+            color: #1976d2;
+            margin-bottom: 10px;
+        }
+        
+        .settings-section {
+            background: white;
+            margin-bottom: 20px;
+            border-radius: 8px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        
+        .section-header {
+            background: #f8f9fa;
+            padding: 15px 20px;
+            border-bottom: 1px solid #dee2e6;
+            border-radius: 8px 8px 0 0;
+        }
+        
+        .section-header h2 {
+            color: #495057;
+            font-size: 18px;
+        }
+        
+        .section-content {
+            padding: 20px;
+        }
+        
+        .setting-group {
+            margin-bottom: 20px;
+        }
+        
+        .setting-group:last-child {
+            margin-bottom: 0;
+        }
+        
+        .setting-label {
+            display: block;
+            font-weight: 600;
+            margin-bottom: 5px;
+            color: #495057;
+        }
+        
+        .setting-description {
+            font-size: 14px;
+            color: #6c757d;
+            margin-bottom: 10px;
+        }
+        
+        .form-control {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ced4da;
+            border-radius: 4px;
+            font-size: 14px;
+            transition: border-color 0.15s ease-in-out, box-shadow 0.15s ease-in-out;
+        }
+        
+        .form-control:focus {
+            outline: 0;
+            border-color: #1976d2;
+            box-shadow: 0 0 0 0.2rem rgba(25, 118, 210, 0.25);
+        }
+        
+        .form-select {
+            background: white;
+            background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewbox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='m6 8 4 4 4-4'/%3e%3c/svg%3e");
+            background-position: right 0.5rem center;
+            background-repeat: no-repeat;
+            background-size: 1.5em 1.5em;
+            padding-right: 2.5rem;
+        }
+        
+        .resolver-list {
+            min-height: 120px;
+        }
+        
+        .btn {
+            display: inline-block;
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            text-decoration: none;
+            transition: all 0.15s ease-in-out;
+            margin-right: 10px;
+            margin-bottom: 10px;
+        }
+        
+        .btn-primary {
+            background: #1976d2;
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            background: #1565c0;
+        }
+        
+        .btn-secondary {
+            background: #6c757d;
+            color: white;
+        }
+        
+        .btn-secondary:hover {
+            background: #5a6268;
+        }
+        
+        .btn-success {
+            background: #28a745;
+            color: white;
+        }
+        
+        .btn-success:hover {
+            background: #218838;
+        }
+        
+        .status-message {
+            padding: 10px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+            display: none;
+        }
+        
+        .status-success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        
+        .status-error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        
+        .resolver-test {
+            margin-top: 10px;
+        }
+        
+        .test-domain {
+            width: 200px;
+            display: inline-block;
+            margin-right: 10px;
+        }
+        
+        .test-result {
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 13px;
+        }
+        
+        .test-success {
+            background: #d4edda;
+            color: #155724;
+        }
+        
+        .test-error {
+            background: #f8d7da;
+            color: #721c24;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>SkyInclude Browser Settings</h1>
+            <p>Configure your browser preferences and HNS resolution settings</p>
+        </div>
+
+        <div id="status-message" class="status-message"></div>
+
+        <!-- HNS Resolution Settings -->
+        <div class="settings-section">
+            <div class="section-header">
+                <h2>🌐 Handshake (HNS) Resolution</h2>
+            </div>
+            <div class="section-content">
+                <div class="setting-group">
+                    <label class="setting-label">Resolution Mode</label>
+                    <p class="setting-description">Choose how HNS domains are resolved</p>
+                    <select id="hnsResolutionMode" class="form-control form-select">
+                        <option value="doh">DNS over HTTPS (DoH) - Fast and reliable</option>
+                        <option value="p2p">P2P Light Client - Fully decentralized</option>
+                    </select>
+                </div>
+
+                <div class="setting-group">
+                    <label class="setting-label">Custom Resolver Endpoint</label>
+                    <p class="setting-description">Add a custom HNS resolver (optional, used first if specified)</p>
+                    <input type="text" id="hnsCustomResolver" class="form-control" placeholder="e.g., custom.hnsdoh.com or 8.8.8.8">
+                </div>
+
+                <div class="setting-group">
+                    <label class="setting-label">Default Resolver Endpoints</label>
+                    <p class="setting-description">Built-in HNS resolvers (one per line)</p>
+                    <textarea id="hnsResolvers" class="form-control resolver-list" rows="4"></textarea>
+                </div>
+
+                <div class="setting-group">
+                    <label class="setting-label">Resolution Timeout (ms)</label>
+                    <p class="setting-description">Maximum time to wait for HNS resolution</p>
+                    <input type="number" id="hnsTimeout" class="form-control" min="5000" max="60000" step="1000">
+                </div>
+
+                <div class="resolver-test">
+                    <h3>Test HNS Resolution</h3>
+                    <input type="text" id="testDomain" class="test-domain form-control" placeholder="welcome.nb" value="welcome.nb">
+                    <button id="testResolver" class="btn btn-primary">Test Resolution</button>
+                    <div id="testResult" class="test-result" style="display: none;"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Privacy Settings -->
+        <div class="settings-section">
+            <div class="section-header">
+                <h2>🛡️ Privacy & Security</h2>
+            </div>
+            <div class="section-content">
+                <div class="setting-group">
+                    <label class="setting-label">
+                        <input type="checkbox" id="blockTrackers"> Block Trackers
+                    </label>
+                    <p class="setting-description">Prevent websites from tracking your browsing activity</p>
+                </div>
+
+                <div class="setting-group">
+                    <label class="setting-label">
+                        <input type="checkbox" id="doNotTrack"> Send "Do Not Track" Headers
+                    </label>
+                    <p class="setting-description">Tell websites not to track you</p>
+                </div>
+
+                <div class="setting-group">
+                    <label class="setting-label">
+                        <input type="checkbox" id="hnsDANE"> Enable DANE Verification for HNS
+                    </label>
+                    <p class="setting-description">Use DNS-based authentication for HNS domains</p>
+                </div>
+
+                <div class="setting-group">
+                    <label class="setting-label">
+                        <input type="checkbox" id="hnsFallbackToDNS"> Fallback to Traditional DNS
+                    </label>
+                    <p class="setting-description">Use regular DNS if HNS resolution fails</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- General Settings -->
+        <div class="settings-section">
+            <div class="section-header">
+                <h2>⚙️ General</h2>
+            </div>
+            <div class="section-content">
+                <div class="setting-group">
+                    <label class="setting-label">Homepage</label>
+                    <p class="setting-description">Default page when opening new tabs</p>
+                    <input type="text" id="homepage" class="form-control" placeholder="skyinclude://home">
+                </div>
+
+                <div class="setting-group">
+                    <label class="setting-label">Search Engine</label>
+                    <p class="setting-description">Default search engine URL (use %s for query)</p>
+                    <input type="text" id="searchEngine" class="form-control" placeholder="https://duckduckgo.com/?q=%s">
+                </div>
+            </div>
+        </div>
+
+        <!-- Action Buttons -->
+        <div class="settings-section">
+            <div class="section-content">
+                <button id="saveSettings" class="btn btn-success">Save Settings</button>
+                <button id="resetSettings" class="btn btn-secondary">Reset to Defaults</button>
+                <button id="closeSettings" class="btn btn-primary">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Settings management
+        let currentSettings = {};
+
+        // Load settings on page load
+        document.addEventListener('DOMContentLoaded', loadSettings);
+
+        async function loadSettings() {
+            try {
+                currentSettings = await window.electronAPI.getSettings();
+                populateSettings(currentSettings);
+            } catch (error) {
+                showMessage('Failed to load settings: ' + error.message, 'error');
+            }
+        }
+
+        function populateSettings(settings) {
+            document.getElementById('hnsResolutionMode').value = settings.hnsResolutionMode || 'doh';
+            document.getElementById('hnsCustomResolver').value = settings.hnsCustomResolver || '';
+            document.getElementById('hnsResolvers').value = (settings.hnsResolvers || []).join('\n');
+            document.getElementById('hnsTimeout').value = settings.hnsTimeout || 15000;
+            document.getElementById('blockTrackers').checked = settings.blockTrackers !== false;
+            document.getElementById('doNotTrack').checked = settings.doNotTrack !== false;
+            document.getElementById('hnsDANE').checked = settings.hnsDANE !== false;
+            document.getElementById('hnsFallbackToDNS').checked = settings.hnsFallbackToDNS !== false;
+            document.getElementById('homepage').value = settings.homepage || 'skyinclude://home';
+            document.getElementById('searchEngine').value = settings.searchEngine || 'https://duckduckgo.com/?q=%s';
+        }
+
+        // Save settings
+        document.getElementById('saveSettings').addEventListener('click', async () => {
+            try {
+                const newSettings = {
+                    hnsResolutionMode: document.getElementById('hnsResolutionMode').value,
+                    hnsCustomResolver: document.getElementById('hnsCustomResolver').value.trim(),
+                    hnsResolvers: document.getElementById('hnsResolvers').value
+                        .split('\n')
+                        .map(r => r.trim())
+                        .filter(r => r.length > 0),
+                    hnsTimeout: parseInt(document.getElementById('hnsTimeout').value),
+                    blockTrackers: document.getElementById('blockTrackers').checked,
+                    doNotTrack: document.getElementById('doNotTrack').checked,
+                    hnsDANE: document.getElementById('hnsDANE').checked,
+                    hnsFallbackToDNS: document.getElementById('hnsFallbackToDNS').checked,
+                    homepage: document.getElementById('homepage').value.trim(),
+                    searchEngine: document.getElementById('searchEngine').value.trim()
+                };
+
+                await window.electronAPI.saveSettings(newSettings);
+                showMessage('Settings saved successfully!', 'success');
+                currentSettings = { ...currentSettings, ...newSettings };
+            } catch (error) {
+                showMessage('Failed to save settings: ' + error.message, 'error');
+            }
+        });
+
+        // Reset settings
+        document.getElementById('resetSettings').addEventListener('click', async () => {
+            if (confirm('Are you sure you want to reset all settings to defaults?')) {
+                try {
+                    await window.electronAPI.saveSettings({});
+                    await loadSettings();
+                    showMessage('Settings reset to defaults', 'success');
+                } catch (error) {
+                    showMessage('Failed to reset settings: ' + error.message, 'error');
+                }
+            }
+        });
+
+        // Close settings
+        document.getElementById('closeSettings').addEventListener('click', () => {
+            window.close();
+        });
+
+        // Test resolver
+        document.getElementById('testResolver').addEventListener('click', async () => {
+            const domain = document.getElementById('testDomain').value.trim();
+            const resultDiv = document.getElementById('testResult');
+            
+            if (!domain) {
+                showTestResult('Please enter a domain to test', 'error');
+                return;
+            }
+            
+            document.getElementById('testResolver').textContent = 'Testing...';
+            document.getElementById('testResolver').disabled = true;
+            
+            try {
+                // This would need to be implemented in the main process
+                showTestResult(`Testing ${domain}... (Test feature coming soon)`, 'success');
+            } catch (error) {
+                showTestResult(`Test failed: ${error.message}`, 'error');
+            } finally {
+                document.getElementById('testResolver').textContent = 'Test Resolution';
+                document.getElementById('testResolver').disabled = false;
+            }
+        });
+
+        function showMessage(message, type) {
+            const statusDiv = document.getElementById('status-message');
+            statusDiv.textContent = message;
+            statusDiv.className = `status-message status-${type}`;
+            statusDiv.style.display = 'block';
+            
+            setTimeout(() => {
+                statusDiv.style.display = 'none';
+            }, 5000);
+        }
+
+        function showTestResult(message, type) {
+            const resultDiv = document.getElementById('testResult');
+            resultDiv.textContent = message;
+            resultDiv.className = `test-result test-${type}`;
+            resultDiv.style.display = 'block';
+        }
+    </script>
+</body>
+</html>

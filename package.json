@@ -1,0 +1,88 @@
+{
+  "name": "skyinclude-browser",
+  "version": "0.1.0",
+  "description": "Electron browser with native Handshake (HNS) domain resolution",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --enable-logging",
+    "build": "electron-builder",
+    "build-mac": "electron-builder --mac",
+    "build-dmg-clean": "electron-builder --mac",
+    "build-windows": "electron-builder --win",
+    "build-all": "electron-builder --mac --win --linux",
+    "dist": "electron-builder --publish=never",
+    "dist-mac": "electron-builder --mac",
+    "dist-win": "electron-builder --win",
+    "dist-linux": "electron-builder --linux",
+    "pack": "electron-builder --dir",
+    "check": "node --check main.js && node --check preload.js && node --check renderer.js && node --check resolver.js && node --check settings.js && node --check history.js",
+    "test": "npm run check"
+  },
+  "keywords": ["browser", "handshake", "hns", "decentralized", "web3"],
+  "author": "SkyInclude Team",
+  "license": "MIT",
+  "dependencies": {},
+  "devDependencies": {
+    "electron": "^30.0.0",
+    "electron-builder": "^24.0.0"
+  },
+  "build": {
+    "appId": "com.skyinclude.browser",
+    "productName": "SkyInclude Browser",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer.js",
+      "resolver.js",
+      "history.js",
+      "settings.js",
+      "index.html",
+      "styles.css",
+      "announcement.html",
+      "settings-ui.html",
+      "assets/**/*"
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["x64", "arm64"]
+        }
+      ],
+      "icon": "assets/icon.icns"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64", "ia32"]
+        }
+      ],
+      "icon": "assets/icon.ico"
+    },
+    "linux": {
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": ["x64"]
+        },
+        {
+          "target": "deb",
+          "arch": ["x64"]
+        }
+      ],
+      "category": "Network"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  }
+}

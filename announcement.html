@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Welcome to SkyInclude</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #fff;
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+        }
+
+        .container {
+            text-align: center;
+            max-width: 800px;
+            padding: 40px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 20px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+        }
+
+        .logo {
+            font-size: 3.5rem;
+            font-weight: 700;
+            margin-bottom: 20px;
+            background: linear-gradient(45deg, #fff, #e0e0ff);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            text-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+        }
+
+        .tagline {
+            font-size: 1.5rem;
+            margin-bottom: 30px;
+            opacity: 0.9;
+            font-weight: 300;
+        }
+
+        .description {
+            font-size: 1.1rem;
+            line-height: 1.6;
+            margin-bottom: 40px;
+            opacity: 0.8;
+        }
+
+        .features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 40px;
+        }
+
+        .feature {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 20px;
+            border-radius: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            transition: transform 0.3s ease, background-color 0.3s ease;
+        }
+
+        .feature:hover {
+            transform: translateY(-5px);
+            background: rgba(255, 255, 255, 0.15);
+        }
+
+        .feature-icon {
+            font-size: 2rem;
+            margin-bottom: 10px;
+            display: block;
+        }
+
+        .feature-title {
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .feature-description {
+            font-size: 0.9rem;
+            opacity: 0.8;
+            line-height: 1.4;
+        }
+
+        .quick-links {
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            flex-wrap: wrap;
+            margin-bottom: 30px;
+        }
+
+        .quick-link {
+            padding: 12px 24px;
+            background: rgba(255, 255, 255, 0.2);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            border-radius: 25px;
+            text-decoration: none;
+            color: #fff;
+            font-weight: 500;
+            transition: all 0.3s ease;
+            backdrop-filter: blur(5px);
+        }
+
+        .quick-link:hover {
+            background: rgba(255, 255, 255, 0.3);
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+        }
+
+        .example-sites {
+            margin-top: 30px;
+            padding-top: 30px;
+            border-top: 1px solid rgba(255, 255, 255, 0.2);
+        }
+
+        .example-title {
+            font-size: 1.2rem;
+            margin-bottom: 15px;
+            opacity: 0.9;
+        }
+
+        .site-examples {
+            display: flex;
+            justify-content: center;
+            gap: 15px;
+            flex-wrap: wrap;
+        }
+
+        .site-example {
+            padding: 8px 16px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 15px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9rem;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+
+        .floating-particles {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            overflow: hidden;
+        }
+
+        .particle {
+            position: absolute;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 50%;
+            animation: float 15s infinite linear;
+        }
+
+        @keyframes float {
+            0% {
+                transform: translateY(100vh) rotate(0deg);
+                opacity: 0;
+            }
+            10% {
+                opacity: 1;
+            }
+            90% {
+                opacity: 1;
+            }
+            100% {
+                transform: translateY(-100px) rotate(360deg);
+                opacity: 0;
+            }
+        }
+
+        .version-info {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            font-size: 0.8rem;
+            opacity: 0.6;
+            background: rgba(0, 0, 0, 0.3);
+            padding: 5px 10px;
+            border-radius: 10px;
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                padding: 20px;
+                margin: 20px;
+            }
+            
+            .logo {
+                font-size: 2.5rem;
+            }
+            
+            .tagline {
+                font-size: 1.2rem;
+            }
+            
+            .description {
+                font-size: 1rem;
+            }
+            
+            .features {
+                grid-template-columns: 1fr;
+            }
+            
+            .quick-links {
+                flex-direction: column;
+                align-items: center;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="floating-particles" id="particles"></div>
+    
+    <div class="container">
+        <h1 class="logo">SkyInclude</h1>
+        <p class="tagline">Surf the Decentralized Web</p>
+        
+        <p class="description">
+            Welcome to SkyInclude, your gateway to both traditional websites and the decentralized web. 
+            Explore Handshake (HNS) domains alongside regular websites with enhanced privacy and security.
+        </p>
+
+        <div class="features">
+            <div class="feature">
+                <span class="feature-icon">🌐</span>
+                <div class="feature-title">Dual Web Support</div>
+                <div class="feature-description">
+                    Browse traditional websites and Handshake blockchain domains seamlessly
+                </div>
+            </div>
+            
+            <div class="feature">
+                <span class="feature-icon">🔒</span>
+                <div class="feature-title">Enhanced Security</div>
+                <div class="feature-description">
+                    DANE-like verification for HNS domains and strict SSL enforcement
+                </div>
+            </div>
+            
+            <div class="feature">
+                <span class="feature-icon">🚀</span>
+                <div class="feature-title">Lightning Fast</div>
+                <div class="feature-description">
+                    Optimized resolution with smart caching and fallback mechanisms
+                </div>
+            </div>
+            
+            <div class="feature">
+                <span class="feature-icon">🛡️</span>
+                <div class="feature-title">Privacy First</div>
+                <div class="feature-description">
+                    No telemetry, built-in tracker blocking, and anonymous browsing
+                </div>
+            </div>
+        </div>
+
+        <div class="quick-links">
+            <a href="https://handshake.org" class="quick-link">Learn about Handshake</a>
+            <a href="https://namebase.io" class="quick-link">Get HNS Domains</a>
+            <a href="https://github.com/handshake-org" class="quick-link">Handshake GitHub</a>
+        </div>
+
+        <div class="example-sites">
+            <div class="example-title">Try these example sites:</div>
+            <div class="site-examples">
+                <div class="site-example">google.com</div>
+                <div class="site-example">github.com</div>
+                <div class="site-example">welcome.nb</div>
+                <div class="site-example">3b</div>
+                <div class="site-example">handshake.org</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="version-info">
+        SkyInclude v1.0.0 Beta
+    </div>
+
+    <script>
+        // Create floating particles animation
+        function createParticle() {
+            const particle = document.createElement('div');
+            particle.className = 'particle';
+            
+            const size = Math.random() * 6 + 2;
+            particle.style.width = size + 'px';
+            particle.style.height = size + 'px';
+            particle.style.left = Math.random() * 100 + '%';
+            particle.style.animationDuration = (Math.random() * 10 + 10) + 's';
+            particle.style.animationDelay = Math.random() * 5 + 's';
+            
+            document.getElementById('particles').appendChild(particle);
+            
+            // Remove particle after animation
+            setTimeout(() => {
+                if (particle.parentNode) {
+                    particle.parentNode.removeChild(particle);
+                }
+            }, 20000);
+        }
+
+        // Create particles periodically
+        setInterval(createParticle, 800);
+
+        // Create initial particles
+        for (let i = 0; i < 10; i++) {
+            setTimeout(createParticle, i * 200);
+        }
+
+        // Add click event to example sites
+        document.querySelectorAll('.site-example').forEach(example => {
+            example.style.cursor = 'pointer';
+            example.addEventListener('click', () => {
+                const site = example.textContent;
+                // This would typically communicate with the browser to navigate
+                console.log('Navigate to:', site);
+                alert(`Click the address bar and type: ${site}`);
+            });
+        });
+
+        // Add some interactive effects
+        document.querySelectorAll('.feature').forEach(feature => {
+            feature.addEventListener('mouseenter', () => {
+                feature.style.transform = 'translateY(-5px) scale(1.02)';
+            });
+            
+            feature.addEventListener('mouseleave', () => {
+                feature.style.transform = 'translateY(0) scale(1)';
+            });
+        });
+
+        // Update time-based greeting
+        const now = new Date();
+        const hour = now.getHours();
+        let greeting = 'Welcome to';
+        
+        if (hour < 12) {
+            greeting = 'Good morning! Welcome to';
+        } else if (hour < 17) {
+            greeting = 'Good afternoon! Welcome to';
+        } else {
+            greeting = 'Good evening! Welcome to';
+        }
+        
+        // Don't update if it would break the design
+        // document.querySelector('.tagline').textContent = greeting + ' the Decentralized Web';
+    </script>
+</body>
+</html>
