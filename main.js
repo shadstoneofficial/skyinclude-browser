@@ -114,6 +114,10 @@ class SkyIncludeBrowser {
                 // Leave headers unchanged for non-standard URLs.
             }
 
+            if (this.settingsManager.getSetting('doNotTrack') !== false) {
+                details.requestHeaders.DNT = '1';
+            }
+
             callback({ requestHeaders: details.requestHeaders });
         });
 
