@@ -114,7 +114,7 @@ class SettingsManager {
     setSetting(key, value) {
         this.settings[key] = value;
         this.saveSettings();
-        console.log(`Setting updated: ${key} = ${value}`);
+        console.log(`Setting updated: ${key}`);
     }
 
     updateSettings(newSettings) {
