@@ -446,12 +446,33 @@ class SkyIncludeBrowser {
     }
 
     async resolveHNS(domain) {
-        try {
-            return await this.hnsResolver.resolveHNSDomain(domain);
-        } catch (error) {
-            console.error('HNS resolution failed:', error);
-            return null;
+        const attempts = 3;
+
+        for (let attempt = 1; attempt <= attempts; attempt += 1) {
+            try {
+                const result = await this.hnsResolver.resolveHNSDomain(domain);
+                if (result) {
+                    if (attempt > 1) {
+                        this.log('hns-resolution-retry-success', { domain, attempt });
+                    }
+                    return result;
+                }
+
+                this.log('hns-resolution-empty', { domain, attempt });
+            } catch (error) {
+                this.log('hns-resolution-error', { domain, attempt, message: error.message });
+                console.error('HNS resolution failed:', error);
+            }
+
+            if (attempt < attempts) {
+                if (typeof this.hnsResolver.clearCache === 'function') {
+                    this.hnsResolver.clearCache();
+                }
+                await new Promise(resolve => setTimeout(resolve, 300 * attempt));
+            }
         }
+
+        return null;
     }
 
     buildHNSNavigation(originalUrl, resolution) {
