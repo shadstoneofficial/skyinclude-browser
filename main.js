@@ -537,6 +537,10 @@ class SkyIncludeBrowser {
     }
 
     addToHistory(url, title) {
+        if (this.settingsManager.getSetting('saveHistory') === false) {
+            return;
+        }
+
         const historyManager = require('./history.js');
         historyManager.addEntry(url, title);
     }
