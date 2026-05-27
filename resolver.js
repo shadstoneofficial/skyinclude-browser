@@ -49,7 +49,7 @@ class HNSResolver {
         const cached = this.cache.get(cacheKey);
 
         if (cached && Date.now() - cached.timestamp < this.cacheTimeout) {
-            console.log('HNS resolution cache hit for:', cleanDomain);
+            console.log('HNS resolution cache hit');
             return cached.result;
         }
 
@@ -78,7 +78,7 @@ class HNSResolver {
 
             return result;
         } catch (error) {
-            console.error('HNS resolution failed for', cleanDomain, ':', error.message);
+            console.error('HNS resolution failed:', error.message);
             return null;
         }
     }
@@ -387,7 +387,7 @@ class HNSResolver {
     }
 
     async resolveP2P(domain) {
-        console.log('P2P HNS resolution not implemented, using public DoH for:', domain);
+        console.log('P2P HNS resolution not implemented, using public DoH');
         return this.resolveViaDoh(this.normalizeDomain(domain));
     }
 
@@ -432,8 +432,7 @@ class HNSResolver {
 
     getCacheStats() {
         return {
-            size: this.cache.size,
-            keys: Array.from(this.cache.keys())
+            size: this.cache.size
         };
     }
 }
