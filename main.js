@@ -1,12 +1,14 @@
 const { app, BrowserWindow, BrowserView, ipcMain, Menu, dialog, shell, session } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { URL } = require('url');
+const { URL, fileURLToPath } = require('url');
 const http = require('http');
 
 // Initialize managers
 const SettingsManager = require('./settings.js');
 const { HNSResolver } = require('./resolver.js');
+
+let activeBrowser = null;
 
 class SkyIncludeBrowser {
     constructor() {
@@ -672,6 +674,165 @@ class SkyIncludeBrowser {
         return hostname.endsWith('.hns.to') ? hostname.slice(0, -'.hns.to'.length) : hostname;
     }
 
+    getIpcSenderUrl(event) {
+        return event.senderFrame?.url || event.sender.getURL();
+    }
+
+    isTrustedAppFileUrl(senderUrl) {
+        try {
+            const parsedUrl = new URL(senderUrl);
+            if (parsedUrl.protocol !== 'file:') {
+                return false;
+            }
+
+            const senderPath = path.normalize(fileURLToPath(parsedUrl));
+            const trustedFiles = new Set([
+                path.normalize(path.join(__dirname, 'index.html')),
+                path.normalize(path.join(__dirname, 'settings-ui.html'))
+            ]);
+
+            return trustedFiles.has(senderPath);
+        } catch (error) {
+            return false;
+        }
+    }
+
+    requireTrustedIpcSender(event, channel) {
+        const senderUrl = this.getIpcSenderUrl(event);
+        if (!this.isTrustedAppFileUrl(senderUrl)) {
+            this.log('blocked-ipc-sender', { channel, senderUrl });
+            throw new Error('Blocked IPC request from untrusted sender');
+        }
+    }
+
+    resolveTabId(tabId) {
+        if (tabId === undefined || tabId === null || tabId === '') {
+            if (!this.activeTabId) {
+                throw new Error('No active tab');
+            }
+            return this.activeTabId;
+        }
+
+        const normalizedTabId = Number(tabId);
+        if (!Number.isSafeInteger(normalizedTabId) || normalizedTabId <= 0 || !this.tabs.has(normalizedTabId)) {
+            throw new Error('Invalid tab id');
+        }
+
+        return normalizedTabId;
+    }
+
+    validateNavigationInput(url, fallbackUrl = 'skyinclude://home') {
+        if (url === undefined || url === null || url === '') {
+            return fallbackUrl;
+        }
+
+        if (typeof url !== 'string') {
+            throw new Error('URL must be a string');
+        }
+
+        const trimmedUrl = url.trim();
+        if (!trimmedUrl) {
+            return fallbackUrl;
+        }
+
+        if (trimmedUrl.length > 2048) {
+            throw new Error('URL is too long');
+        }
+
+        return trimmedUrl;
+    }
+
+    validateNavigationPayload(payload) {
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+            throw new Error('Invalid navigation payload');
+        }
+
+        return {
+            tabId: this.resolveTabId(payload.tabId),
+            url: this.validateNavigationInput(payload.url, '')
+        };
+    }
+
+    getAllowedSettingKeys() {
+        return new Set([
+            'hnsResolutionMode',
+            'hnsResolvers',
+            'hnsCustomResolver',
+            'hnsTimeout',
+            'hnsDANE',
+            'hnsFallbackToDNS',
+            'blockTrackers',
+            'enableJavaScript',
+            'blockAds',
+            'doNotTrack',
+            'clearDataOnExit',
+            'strictSSL',
+            'mixedContentBlocking',
+            'certificateTransparency',
+            'secureOnlyMode',
+            'homepage',
+            'searchEngine',
+            'downloadPath',
+            'language',
+            'theme',
+            'hardwareAcceleration',
+            'experimentalFeatures',
+            'developerMode',
+            'customCSS',
+            'userAgent',
+            'historyRetentionDays',
+            'maxHistoryEntries',
+            'saveHistory',
+            'autoUpdate',
+            'betaUpdates'
+        ]);
+    }
+
+    sanitizeSettingsPayload(settings) {
+        if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+            throw new Error('Settings payload must be an object');
+        }
+
+        const allowedSettingKeys = this.getAllowedSettingKeys();
+        const sanitizedSettings = {};
+
+        Object.entries(settings).forEach(([key, value]) => {
+            if (allowedSettingKeys.has(key)) {
+                sanitizedSettings[key] = value;
+            }
+        });
+
+        return sanitizedSettings;
+    }
+
+    sanitizeSettingUpdate(key, value) {
+        if (typeof key !== 'string' || !this.getAllowedSettingKeys().has(key)) {
+            throw new Error('Invalid setting key');
+        }
+
+        return this.sanitizeSettingsPayload({ [key]: value });
+    }
+
+    isAllowedExternalUrl(navigationUrl) {
+        try {
+            const parsedUrl = new URL(navigationUrl);
+            return ['https:', 'mailto:'].includes(parsedUrl.protocol);
+        } catch (error) {
+            return false;
+        }
+    }
+
+    openExternalUrl(navigationUrl) {
+        if (!this.isAllowedExternalUrl(navigationUrl)) {
+            this.log('blocked-external-url', { url: navigationUrl });
+            return;
+        }
+
+        shell.openExternal(navigationUrl).catch(error => {
+            this.log('external-url-open-error', { url: navigationUrl, message: error.message });
+        });
+    }
+
     setupMenus() {
         const template = [
             {
@@ -789,26 +950,31 @@ class SkyIncludeBrowser {
 
     setupIpcHandlers() {
         // Navigation handlers
-        ipcMain.handle('navigate-to', async (event, { tabId, url }) => {
-            await this.loadUrlInTab(tabId || this.activeTabId, url);
+        ipcMain.handle('navigate-to', async (event, payload) => {
+            this.requireTrustedIpcSender(event, 'navigate-to');
+            const { tabId, url } = this.validateNavigationPayload(payload);
+            await this.loadUrlInTab(tabId, url);
         });
 
         ipcMain.handle('go-back', (event, tabId) => {
-            const tab = this.tabs.get(tabId || this.activeTabId);
+            this.requireTrustedIpcSender(event, 'go-back');
+            const tab = this.tabs.get(this.resolveTabId(tabId));
             if (tab && tab.view.webContents.canGoBack()) {
                 tab.view.webContents.goBack();
             }
         });
 
         ipcMain.handle('go-forward', (event, tabId) => {
-            const tab = this.tabs.get(tabId || this.activeTabId);
+            this.requireTrustedIpcSender(event, 'go-forward');
+            const tab = this.tabs.get(this.resolveTabId(tabId));
             if (tab && tab.view.webContents.canGoForward()) {
                 tab.view.webContents.goForward();
             }
         });
 
         ipcMain.handle('reload', (event, tabId) => {
-            const tab = this.tabs.get(tabId || this.activeTabId);
+            this.requireTrustedIpcSender(event, 'reload');
+            const tab = this.tabs.get(this.resolveTabId(tabId));
             if (tab) {
                 tab.view.webContents.reload();
             }
@@ -816,18 +982,22 @@ class SkyIncludeBrowser {
 
         // Tab management
         ipcMain.handle('new-tab', async (event, url) => {
-            return await this.createNewTab(url);
+            this.requireTrustedIpcSender(event, 'new-tab');
+            return await this.createNewTab(this.validateNavigationInput(url));
         });
 
         ipcMain.handle('close-tab', (event, tabId) => {
-            this.closeTab(tabId);
+            this.requireTrustedIpcSender(event, 'close-tab');
+            this.closeTab(this.resolveTabId(tabId));
         });
 
         ipcMain.handle('switch-tab', (event, tabId) => {
-            this.switchToTab(tabId);
+            this.requireTrustedIpcSender(event, 'switch-tab');
+            this.switchToTab(this.resolveTabId(tabId));
         });
 
-        ipcMain.handle('get-tabs', () => {
+        ipcMain.handle('get-tabs', (event) => {
+            this.requireTrustedIpcSender(event, 'get-tabs');
             return Array.from(this.tabs.values()).map(tab => ({
                 id: tab.id,
                 url: tab.url,
@@ -838,38 +1008,48 @@ class SkyIncludeBrowser {
         });
 
         // History
-        ipcMain.handle('get-history', () => {
+        ipcMain.handle('get-history', (event) => {
+            this.requireTrustedIpcSender(event, 'get-history');
             const historyManager = require('./history.js');
             return historyManager.getHistory();
         });
 
         // Settings
-        ipcMain.handle('get-settings', () => {
+        ipcMain.handle('get-settings', (event) => {
+            this.requireTrustedIpcSender(event, 'get-settings');
             return this.settingsManager.getSettings();
         });
 
         ipcMain.handle('save-settings', (event, settings) => {
-            const result = this.settingsManager.updateSettings(settings);
+            this.requireTrustedIpcSender(event, 'save-settings');
+            const result = this.settingsManager.updateSettings(this.sanitizeSettingsPayload(settings));
             // Reinitialize resolver with new settings
             this.hnsResolver = new HNSResolver(this.settingsManager);
             return result;
         });
         
         ipcMain.handle('update-setting', (event, key, value) => {
-            this.settingsManager.setSetting(key, value);
+            this.requireTrustedIpcSender(event, 'update-setting');
+            const settingsUpdate = this.sanitizeSettingUpdate(key, value);
+            const validatedSettings = this.settingsManager.validateSettings(settingsUpdate);
+            if (!Object.prototype.hasOwnProperty.call(validatedSettings, key)) {
+                throw new Error('Invalid setting value');
+            }
+
+            const result = this.settingsManager.updateSettings(validatedSettings);
             // Reinitialize resolver if HNS settings changed
             if (key.startsWith('hns')) {
                 this.hnsResolver = new HNSResolver(this.settingsManager);
             }
-            return true;
+            return result;
         });
     }
 }
 
 // App event handlers
 app.whenReady().then(async () => {
-    const browser = new SkyIncludeBrowser();
-    await browser.createMainWindow();
+    activeBrowser = new SkyIncludeBrowser();
+    await activeBrowser.createMainWindow();
 });
 
 app.on('window-all-closed', () => {
@@ -880,8 +1060,8 @@ app.on('window-all-closed', () => {
 
 app.on('activate', async () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-        const browser = new SkyIncludeBrowser();
-        await browser.createMainWindow();
+        activeBrowser = new SkyIncludeBrowser();
+        await activeBrowser.createMainWindow();
     }
 });
 
@@ -889,6 +1069,8 @@ app.on('activate', async () => {
 app.on('web-contents-created', (event, contents) => {
     contents.on('new-window', (event, navigationUrl) => {
         event.preventDefault();
-        shell.openExternal(navigationUrl);
+        if (activeBrowser) {
+            activeBrowser.openExternalUrl(navigationUrl);
+        }
     });
 });
