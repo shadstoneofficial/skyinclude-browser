@@ -1,0 +1,90 @@
+name: Build release artifacts
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform.name }}
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: macOS
+            runner: macos-latest
+            build-script: dist-mac
+            artifact-name: skyinclude-browser-macos
+          - name: Windows
+            runner: windows-latest
+            build-script: dist-win
+            artifact-name: skyinclude-browser-windows
+          - name: Ubuntu
+            runner: ubuntu-latest
+            build-script: dist-linux
+            artifact-name: skyinclude-browser-ubuntu
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run syntax checks
+        run: npm test
+
+      - name: Build platform package
+        run: npm run ${{ matrix.platform.build-script }}
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          cd dist
+          node <<'NODE'
+          const fs = require('fs');
+          const crypto = require('crypto');
+
+          const skip = new Set(['builder-debug.yml', 'builder-effective-config.yaml', 'SHA256SUMS.txt']);
+          const files = fs.readdirSync('.')
+            .filter((file) => fs.statSync(file).isFile())
+            .filter((file) => !skip.has(file))
+            .sort();
+
+          const lines = files.map((file) => {
+            const hash = crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+            return `${hash}  ${file}`;
+          });
+
+          fs.writeFileSync('SHA256SUMS.txt', `${lines.join('\n')}\n`);
+          NODE
+          cat SHA256SUMS.txt
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform.artifact-name }}
+          path: |
+            dist/*.dmg
+            dist/*.exe
+            dist/*.AppImage
+            dist/*.deb
+            dist/*.blockmap
+            dist/latest*.yml
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14

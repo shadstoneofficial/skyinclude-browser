@@ -39,6 +39,14 @@ Build macOS DMGs:
 npm run build-mac
 ```
 
+Build release artifacts for macOS, Windows, and Ubuntu:
+
+```bash
+gh workflow run release.yml --repo shadstoneofficial/skyinclude-browser --ref main
+```
+
+Release tags matching `v*` also trigger the artifact workflow. See [docs/releasing.md](docs/releasing.md).
+
 Build output is written to `dist/`, which is intentionally ignored by git.
 
 ## HNS Resolution
@@ -89,4 +97,3 @@ On macOS, debug logs are written to:
 ## License
 
 MIT
-
