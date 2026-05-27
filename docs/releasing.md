@@ -56,3 +56,5 @@ Use the GitHub release manager workflow after the artifact workflow passes:
 The macOS build currently disables automatic certificate discovery in CI. That allows unsigned DMGs to build reproducibly, but public users may see macOS security prompts until Developer ID signing and notarization are configured.
 
 Windows packages are also unsigned until a code-signing certificate is configured.
+
+The artifact workflow builds packages with Electron Builder publishing disabled. GitHub Releases should be created explicitly after the workflow artifacts are reviewed.

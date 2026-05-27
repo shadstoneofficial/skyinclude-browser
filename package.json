@@ -12,9 +12,9 @@
     "build-windows": "electron-builder --win",
     "build-all": "electron-builder --mac --win --linux",
     "dist": "electron-builder --publish=never",
-    "dist-mac": "electron-builder --mac",
-    "dist-win": "electron-builder --win",
-    "dist-linux": "electron-builder --linux",
+    "dist-mac": "electron-builder --mac --publish=never",
+    "dist-win": "electron-builder --win --publish=never",
+    "dist-linux": "electron-builder --linux --publish=never",
     "pack": "electron-builder --dir",
     "check": "node --check main.js && node --check preload.js && node --check renderer.js && node --check resolver.js && node --check settings.js && node --check history.js",
     "test": "npm run check"
@@ -76,7 +76,8 @@
           "arch": ["x64"]
         }
       ],
-      "category": "Network"
+      "category": "Network",
+      "maintainer": "SkyInclude Team <shadstoneofficial@users.noreply.github.com>"
     },
     "nsis": {
       "oneClick": false,
