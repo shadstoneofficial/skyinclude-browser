@@ -162,6 +162,16 @@ body {
     cursor: not-allowed;
 }
 
+.version-badge {
+    align-self: center;
+    color: #6b7280;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1;
+    white-space: nowrap;
+    padding: 0 2px;
+}
+
 .address-bar-container {
     flex: 1;
     display: flex;
@@ -504,6 +514,18 @@ body {
     height: 1px;
     background-color: #e5e7eb;
     margin: 4px 0;
+}
+
+.dropdown-version {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 10px 16px;
+    color: #6b7280;
+    font-size: 12px;
+    font-weight: 600;
+    background-color: #f9fafb;
 }
 
 /* Responsive Design */

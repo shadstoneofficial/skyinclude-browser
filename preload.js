@@ -52,6 +52,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getSettings: () => ipcRenderer.invoke('get-settings'),
     saveSettings: (settings) => ipcRenderer.invoke('save-settings', settings),
     updateSetting: (key, value) => ipcRenderer.invoke('update-setting', key, value),
+
+    // App info
+    getAppInfo: () => ipcRenderer.invoke('get-app-info'),
+    showAbout: () => ipcRenderer.invoke('show-about'),
+    openLatestRelease: () => ipcRenderer.invoke('open-latest-release'),
     
     // Event listeners
     onTabSwitched: (callback) => onAllowedChannel('tab-switched', callback),

@@ -36,6 +36,25 @@
             color: #1976d2;
             margin-bottom: 10px;
         }
+
+        .header-title {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+        }
+
+        .version-pill {
+            color: #495057;
+            background: #f1f3f5;
+            border: 1px solid #dee2e6;
+            border-radius: 999px;
+            font-size: 13px;
+            font-weight: 600;
+            line-height: 1;
+            padding: 6px 10px;
+            white-space: nowrap;
+        }
         
         .settings-section {
             background: white;
@@ -200,7 +219,10 @@
 <body>
     <div class="container">
         <div class="header">
-            <h1>SkyInclude Browser Settings</h1>
+            <div class="header-title">
+                <h1>SkyInclude Browser Settings</h1>
+                <span id="settings-version" class="version-pill"></span>
+            </div>
             <p>Configure your browser preferences and HNS resolution settings</p>
         </div>
 
@@ -319,7 +341,20 @@
         let currentSettings = {};
 
         // Load settings on page load
-        document.addEventListener('DOMContentLoaded', loadSettings);
+        document.addEventListener('DOMContentLoaded', () => {
+            loadSettings();
+            loadAppInfo();
+        });
+
+        async function loadAppInfo() {
+            try {
+                const info = await window.electronAPI.getAppInfo();
+                const version = info?.version ? `v${info.version}` : '';
+                document.getElementById('settings-version').textContent = version;
+            } catch (error) {
+                console.error('Failed to load app info:', error);
+            }
+        }
 
         async function loadSettings() {
             try {

@@ -51,6 +51,10 @@
                 <button id="hns-test-btn" class="nav-button" title="HNS Resolver Test">
                     <i class="fas fa-network-wired"></i>
                 </button>
+                <button id="update-btn" class="nav-button" title="Check for updates">
+                    <i class="fas fa-download"></i>
+                </button>
+                <span id="app-version-badge" class="version-badge" title="SkyInclude Browser version"></span>
                 <button id="menu-btn" class="nav-button" title="Menu">
                     <i class="fas fa-ellipsis-v"></i>
                 </button>
@@ -278,6 +282,14 @@
 
         <!-- Menu Dropdown -->
         <div id="menu-dropdown" class="dropdown hidden">
+            <div class="dropdown-version">
+                <span>SkyInclude Browser</span>
+                <span id="menu-version-label"></span>
+            </div>
+            <div class="dropdown-item" data-action="updates">
+                <i class="fas fa-download"></i> Check for Updates
+            </div>
+            <div class="dropdown-separator"></div>
             <div class="dropdown-item" data-action="new-tab">
                 <i class="fas fa-plus"></i> New Tab
             </div>

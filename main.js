@@ -9,6 +9,7 @@ const SettingsManager = require('./settings.js');
 const { HNSResolver } = require('./resolver.js');
 
 let activeBrowser = null;
+const LATEST_RELEASE_URL = 'https://github.com/shadstoneofficial/skyinclude-browser/releases/latest';
 
 class SkyIncludeBrowser {
     constructor() {
@@ -29,7 +30,13 @@ class SkyIncludeBrowser {
             '185.199.110.153',
             '185.199.111.153'
         ]);
+        this.appVersion = app.getVersion();
         this.logFile = path.join(app.getPath('userData'), 'skyinclude-debug.log');
+        this.log('app-started', {
+            version: this.appVersion,
+            platform: process.platform,
+            arch: process.arch
+        });
         
         // Initialize managers
         this.settingsManager = new SettingsManager();
@@ -590,7 +597,8 @@ class SkyIncludeBrowser {
             if (!fs.existsSync(dir)) {
                 fs.mkdirSync(dir, { recursive: true });
             }
-            fs.appendFileSync(this.logFile, `${new Date().toISOString()} ${event} ${JSON.stringify(this.redactLogData(data))}\n`);
+            const versionSummary = event === 'app-started' && data.version ? ` version=${data.version}` : '';
+            fs.appendFileSync(this.logFile, `${new Date().toISOString()} ${event}${versionSummary} ${JSON.stringify(this.redactLogData(data))}\n`);
         } catch (error) {
             console.error('Failed to write SkyInclude log:', error);
         }
@@ -907,6 +915,39 @@ class SkyIncludeBrowser {
         });
     }
 
+    getAppInfo() {
+        return {
+            name: app.getName(),
+            version: this.appVersion,
+            platform: process.platform,
+            arch: process.arch,
+            latestReleaseUrl: LATEST_RELEASE_URL
+        };
+    }
+
+    showAboutDialog() {
+        const detail = [
+            `Version ${this.appVersion}`,
+            `Platform ${process.platform} ${process.arch}`,
+            '',
+            'SkyInclude Browser resolves Handshake/HNS websites and HeadlessDomains agent records.'
+        ].join('\n');
+
+        dialog.showMessageBox(this.mainWindow, {
+            type: 'info',
+            title: 'About SkyInclude Browser',
+            message: 'SkyInclude Browser',
+            detail,
+            buttons: ['OK']
+        }).catch(error => {
+            this.log('about-dialog-error', { message: error.message });
+        });
+    }
+
+    openLatestReleasePage() {
+        this.openExternalUrl(LATEST_RELEASE_URL);
+    }
+
     setupMenus() {
         const template = [
             {
@@ -987,6 +1028,19 @@ class SkyIncludeBrowser {
                         click: () => {
                             this.openSettingsWindow();
                         }
+                    }
+                ]
+            },
+            {
+                label: 'Help',
+                submenu: [
+                    {
+                        label: `About SkyInclude Browser v${this.appVersion}`,
+                        click: () => this.showAboutDialog()
+                    },
+                    {
+                        label: 'Check for Updates',
+                        click: () => this.openLatestReleasePage()
                     }
                 ]
             }
@@ -1117,6 +1171,21 @@ class SkyIncludeBrowser {
                 this.hnsResolver = new HNSResolver(this.settingsManager);
             }
             return result;
+        });
+
+        ipcMain.handle('get-app-info', (event) => {
+            this.requireTrustedIpcSender(event, 'get-app-info');
+            return this.getAppInfo();
+        });
+
+        ipcMain.handle('show-about', (event) => {
+            this.requireTrustedIpcSender(event, 'show-about');
+            this.showAboutDialog();
+        });
+
+        ipcMain.handle('open-latest-release', (event) => {
+            this.requireTrustedIpcSender(event, 'open-latest-release');
+            this.openLatestReleasePage();
         });
     }
 }

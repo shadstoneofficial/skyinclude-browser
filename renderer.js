@@ -21,6 +21,9 @@ class SkyIncludeRenderer {
         this.loadingIndicator = document.getElementById('loading-indicator');
         this.securityIndicator = document.getElementById('security-indicator');
         this.hostingIndicator = document.getElementById('hosting-indicator');
+        this.updateBtn = document.getElementById('update-btn');
+        this.appVersionBadge = document.getElementById('app-version-badge');
+        this.menuVersionLabel = document.getElementById('menu-version-label');
         
         // Tab elements
         this.tabsContainer = document.getElementById('tabs-container');
@@ -69,6 +72,9 @@ class SkyIncludeRenderer {
         
         // HNS Test button
         this.hnsTestBtn.addEventListener('click', () => this.openHnsTestModal());
+
+        // Update check button
+        this.updateBtn.addEventListener('click', () => this.openLatestRelease());
         
         // Menu
         this.menuBtn.addEventListener('click', (e) => {
@@ -182,6 +188,7 @@ class SkyIncludeRenderer {
 
     async loadInitialState() {
         try {
+            await this.loadAppInfo();
             const tabs = await window.electronAPI.getTabs();
             this.renderTabs(tabs);
             
@@ -194,6 +201,22 @@ class SkyIncludeRenderer {
             }
         } catch (error) {
             console.error('Failed to load initial state:', error);
+        }
+    }
+
+    async loadAppInfo() {
+        try {
+            const info = await window.electronAPI.getAppInfo();
+            const versionText = info?.version ? `v${info.version}` : '';
+            if (this.appVersionBadge) {
+                this.appVersionBadge.textContent = versionText;
+                this.appVersionBadge.title = versionText ? `SkyInclude Browser ${versionText}` : 'SkyInclude Browser';
+            }
+            if (this.menuVersionLabel) {
+                this.menuVersionLabel.textContent = versionText;
+            }
+        } catch (error) {
+            console.error('Failed to load app info:', error);
         }
     }
 
@@ -456,11 +479,14 @@ class SkyIncludeRenderer {
             case 'settings':
                 this.showSettings();
                 break;
+            case 'updates':
+                await this.openLatestRelease();
+                break;
             case 'dev-tools':
                 this.openDevTools();
                 break;
             case 'about':
-                this.showAbout();
+                await this.showAbout();
                 break;
         }
     }
@@ -641,8 +667,20 @@ class SkyIncludeRenderer {
     }
 
     // About dialog
-    showAbout() {
-        this.showStatus('SkyInclude Browser v1.0.0 - Decentralized Web Explorer', 'info');
+    async showAbout() {
+        try {
+            await window.electronAPI.showAbout();
+        } catch (error) {
+            this.showError(`Unable to show About: ${error.message}`);
+        }
+    }
+
+    async openLatestRelease() {
+        try {
+            await window.electronAPI.openLatestRelease();
+        } catch (error) {
+            this.showError(`Unable to open releases: ${error.message}`);
+        }
     }
 
     // HNS Test Modal Methods
