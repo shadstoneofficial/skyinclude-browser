@@ -41,13 +41,6 @@ class SkyIncludeRenderer {
         this.settingsModal = document.getElementById('settings-modal');
         this.historyList = document.getElementById('history-list');
         
-        // HNS Test Modal elements
-        this.hnsTestBtn = document.getElementById('hns-test-btn');
-        this.hnsTestModal = document.getElementById('hns-test-modal');
-        this.testDomainInput = document.getElementById('test-domain');
-        this.testResolverInput = document.getElementById('test-resolver');
-        this.queryBtn = document.getElementById('query-btn');
-        this.clearBtn = document.getElementById('clear-btn');
     }
 
     setupEventListeners() {
@@ -70,9 +63,6 @@ class SkyIncludeRenderer {
         // Tab management
         this.newTabBtn.addEventListener('click', () => this.createNewTab());
         
-        // HNS Test button
-        this.hnsTestBtn.addEventListener('click', () => this.openHnsTestModal());
-
         // Update check button
         this.updateBtn.addEventListener('click', () => this.openLatestRelease());
         
@@ -105,10 +95,6 @@ class SkyIncludeRenderer {
         // Settings
         document.getElementById('save-settings').addEventListener('click', () => this.saveSettings());
         document.getElementById('reset-settings').addEventListener('click', () => this.resetSettings());
-        
-        // HNS Test modal
-        this.queryBtn.addEventListener('click', () => this.performDnsQuery());
-        this.clearBtn.addEventListener('click', () => this.clearTestResults());
         
         // Global click handler for closing dropdowns/modals
         document.addEventListener('click', (e) => {
@@ -690,163 +676,6 @@ class SkyIncludeRenderer {
         } catch (error) {
             this.showError(`Unable to open releases: ${error.message}`);
         }
-    }
-
-    // HNS Test Modal Methods
-    openHnsTestModal() {
-        // Set default values
-        this.testDomainInput.value = 'setup.skyinclude';
-        this.testResolverInput.value = 'https://hnsdoh.com/dns-query';
-        this.clearTestResults();
-        this.showModal('hns-test-modal');
-    }
-
-    clearTestResults() {
-        // Clear result display
-        document.getElementById('result-status').textContent = 'Ready';
-        document.getElementById('result-time').textContent = '0 ms';
-        document.getElementById('result-rcode').textContent = 'NOQUERY';
-        document.getElementById('result-size').textContent = '0';
-        document.getElementById('result-asize').textContent = '0';
-        
-        // Clear flags
-        document.querySelectorAll('.flag-label input[type="checkbox"]').forEach(cb => {
-            cb.checked = false;
-        });
-        
-        // Clear sections
-        document.getElementById('answer-section').replaceChildren();
-        document.getElementById('authority-section').replaceChildren();
-        document.getElementById('additional-section').replaceChildren();
-    }
-
-    async performDnsQuery() {
-        const domain = this.testDomainInput.value.trim();
-        const resolver = this.testResolverInput.value.trim();
-        const qtype = document.getElementById('test-qtype').value;
-        const qclass = document.getElementById('test-class').value;
-        
-        if (!domain) {
-            this.showError('Please enter a domain name');
-            return;
-        }
-        
-        if (!resolver) {
-            this.showError('Please enter a DNS resolver');
-            return;
-        }
-
-        // Disable query button and show loading
-        this.queryBtn.disabled = true;
-        this.setIconButtonText(this.queryBtn, 'fas fa-spinner fa-spin', 'QUERYING...');
-        
-        document.getElementById('result-status').textContent = 'Querying...';
-
-        const startTime = Date.now();
-
-        try {
-            // Perform DNS query using DoH
-            const result = await this.dohQuery(domain, qtype, resolver);
-            const queryTime = Date.now() - startTime;
-            
-            this.displayDnsResult(result, queryTime);
-            
-        } catch (error) {
-            console.error('DNS Query Error:', error);
-            
-            const queryTime = Date.now() - startTime;
-            document.getElementById('result-status').textContent = 'Error';
-            document.getElementById('result-time').textContent = queryTime + ' ms';
-            document.getElementById('result-rcode').textContent = 'SERVFAIL';
-            
-            // Show error in answer section
-            const errorRecord = document.createElement('div');
-            errorRecord.className = 'dns-record';
-            errorRecord.style.color = '#ef4444';
-            errorRecord.textContent = `Error: ${error.message}`;
-            document.getElementById('answer-section').replaceChildren(errorRecord);
-            
-        } finally {
-            // Re-enable query button
-            this.queryBtn.disabled = false;
-            this.setIconButtonText(this.queryBtn, 'fas fa-search', 'QUERY');
-        }
-    }
-
-    async dohQuery(domain, qtype, resolver) {
-        // Build DoH query URL
-        const dohUrl = new URL(resolver);
-        dohUrl.searchParams.set('name', domain);
-        dohUrl.searchParams.set('type', qtype);
-        
-        const response = await fetch(dohUrl.toString(), {
-            method: 'GET',
-            headers: {
-                'Accept': 'application/dns-json'
-            }
-        });
-
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-        }
-
-        return await response.json();
-    }
-
-    displayDnsResult(result, queryTime) {
-        // Update status
-        document.getElementById('result-status').textContent = result.Status === 0 ? 'NOERROR' : 'ERROR';
-        document.getElementById('result-time').textContent = queryTime + ' ms';
-        document.getElementById('result-rcode').textContent = this.getRCodeText(result.Status);
-        document.getElementById('result-size').textContent = JSON.stringify(result).length;
-        document.getElementById('result-asize').textContent = result.Answer ? result.Answer.length : 0;
-
-        // Update flags (simplified - not all flags are available in DoH JSON response)
-        document.getElementById('flag-rd').checked = result.RD || false;
-        document.getElementById('flag-ra').checked = result.RA || false;
-        document.getElementById('flag-ad').checked = result.AD || false;
-        document.getElementById('flag-cd').checked = result.CD || false;
-
-        // Display answer section
-        this.displayDnsSection('answer-section', result.Answer, 'answer');
-        
-        // Display authority section
-        this.displayDnsSection('authority-section', result.Authority, 'authority');
-        
-        // Display additional section
-        this.displayDnsSection('additional-section', result.Additional, 'additional');
-    }
-
-    displayDnsSection(elementId, records, type) {
-        const element = document.getElementById(elementId);
-        element.replaceChildren();
-        
-        if (!records || records.length === 0) {
-            return;
-        }
-
-        const fragment = document.createDocumentFragment();
-
-        records.forEach(record => {
-            const recordData = String(record.data || '');
-            const isHighlighted = type === 'answer' && recordData && 
-                                  (recordData.includes('34.234.248.146') || 
-                                   recordData.includes('setup.skyinclude'));
-            
-            const recordElement = document.createElement('div');
-            recordElement.className = isHighlighted ? 'dns-record ' + type + ' record-highlight' : 'dns-record ' + type;
-            recordElement.textContent = `${record.name || ''}. ${record.TTL || ''} ${record.type || ''} ${recordData}`;
-            
-            fragment.appendChild(recordElement);
-        });
-
-        element.appendChild(fragment);
-    }
-
-    setIconButtonText(button, iconClass, text) {
-        const icon = document.createElement('i');
-        icon.className = iconClass;
-        button.replaceChildren(icon, document.createTextNode(` ${text}`));
     }
 
     getRCodeText(code) {
