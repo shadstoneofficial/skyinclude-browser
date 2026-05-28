@@ -57,6 +57,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getAppInfo: () => ipcRenderer.invoke('get-app-info'),
     showAbout: () => ipcRenderer.invoke('show-about'),
     openLatestRelease: () => ipcRenderer.invoke('open-latest-release'),
+    showAppMenu: (anchor) => ipcRenderer.invoke('show-app-menu', anchor),
     
     // Event listeners
     onTabSwitched: (callback) => onAllowedChannel('tab-switched', callback),

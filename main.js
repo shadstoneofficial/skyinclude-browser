@@ -948,6 +948,64 @@ class SkyIncludeBrowser {
         this.openExternalUrl(LATEST_RELEASE_URL);
     }
 
+    showAppPopupMenu(anchor = {}) {
+        const menu = Menu.buildFromTemplate([
+            {
+                label: `SkyInclude Browser v${this.appVersion}`,
+                enabled: false
+            },
+            { type: 'separator' },
+            {
+                label: 'Check for Updates',
+                click: () => this.openLatestReleasePage()
+            },
+            { type: 'separator' },
+            {
+                label: 'New Tab',
+                accelerator: 'CmdOrCtrl+T',
+                click: () => {
+                    this.createNewTab().catch(error => {
+                        this.log('new-tab-error', { message: error.message });
+                    });
+                }
+            },
+            {
+                label: 'History',
+                click: () => {
+                    this.mainWindow.webContents.send('show-history');
+                }
+            },
+            {
+                label: 'Settings',
+                click: () => {
+                    this.mainWindow.webContents.send('show-settings');
+                }
+            },
+            { type: 'separator' },
+            {
+                label: 'Developer Tools',
+                click: () => {
+                    if (this.currentView) {
+                        this.currentView.webContents.openDevTools();
+                    }
+                }
+            },
+            { type: 'separator' },
+            {
+                label: 'About SkyInclude Browser',
+                click: () => this.showAboutDialog()
+            }
+        ]);
+
+        const popupOptions = { window: this.mainWindow };
+        if (Number.isFinite(anchor.x) && Number.isFinite(anchor.y)) {
+            popupOptions.x = Math.round(anchor.x);
+            popupOptions.y = Math.round(anchor.y);
+        }
+
+        menu.popup(popupOptions);
+    }
+
     setupMenus() {
         const template = [
             {
@@ -1201,6 +1259,15 @@ class SkyIncludeBrowser {
         ipcMain.handle('open-latest-release', (event) => {
             this.requireTrustedIpcSender(event, 'open-latest-release');
             this.openLatestReleasePage();
+        });
+
+        ipcMain.handle('show-app-menu', (event, anchor) => {
+            this.requireTrustedIpcSender(event, 'show-app-menu');
+            const safeAnchor = anchor && typeof anchor === 'object' ? anchor : {};
+            this.showAppPopupMenu({
+                x: Number(safeAnchor.x),
+                y: Number(safeAnchor.y)
+            });
         });
     }
 }

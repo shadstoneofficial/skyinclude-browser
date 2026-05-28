@@ -79,7 +79,7 @@ class SkyIncludeRenderer {
         // Menu
         this.menuBtn.addEventListener('click', (e) => {
             e.stopPropagation();
-            this.toggleMenu();
+            this.showNativeMenu();
         });
         
         // Menu dropdown items
@@ -460,8 +460,17 @@ class SkyIncludeRenderer {
     }
 
     // Menu handling
-    toggleMenu() {
-        this.menuDropdown.classList.toggle('hidden');
+    async showNativeMenu() {
+        const rect = this.menuBtn.getBoundingClientRect();
+        try {
+            await window.electronAPI.showAppMenu({
+                x: rect.left,
+                y: rect.bottom
+            });
+        } catch (error) {
+            console.error('Failed to show native menu:', error);
+            this.menuDropdown.classList.toggle('hidden');
+        }
     }
 
     hideMenu() {
