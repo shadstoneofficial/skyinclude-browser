@@ -55,13 +55,17 @@ class HNSResolver {
 
         try {
             let result = null;
+            const settings = this.getResolverSettings();
 
             if (this.isHeadlessDomain(cleanDomain)) {
-                result = await this.lookupHeadlessDomain(cleanDomain);
-            }
-
-            const settings = this.getResolverSettings();
-            if (!result && settings.resolutionMode === 'p2p') {
+                result = await this.resolveViaDoh(cleanDomain, { preferWebRecords: true });
+                if (!result) {
+                    result = await this.lookupHeadlessDomain(cleanDomain);
+                }
+                if (!result && settings.resolutionMode === 'p2p') {
+                    result = await this.resolveP2P(cleanDomain);
+                }
+            } else if (settings.resolutionMode === 'p2p') {
                 result = await this.resolveP2P(cleanDomain);
             }
 
@@ -129,7 +133,7 @@ class HNSResolver {
         }
     }
 
-    async resolveViaDoh(domain) {
+    async resolveViaDoh(domain, options = {}) {
         const settings = this.getResolverSettings();
         const [txtRecords, cnameRecords, aRecords, aaaaRecords] = await Promise.all([
             this.queryDoh(settings.dohResolver, domain, 'TXT', settings.timeout).catch(() => []),
@@ -137,6 +141,21 @@ class HNSResolver {
             this.queryDoh(settings.dohResolver, domain, 'A', settings.timeout).catch(() => []),
             this.queryDoh(settings.dohResolver, domain, 'AAAA', settings.timeout).catch(() => [])
         ]);
+        const records = { TXT: txtRecords, CNAME: cnameRecords, A: aRecords, AAAA: aaaaRecords };
+
+        if (options.preferWebRecords) {
+            const addressResult = this.buildAddressResult(domain, records);
+            if (addressResult) {
+                return addressResult;
+            }
+
+            const cnameResult = this.buildCnameResult(domain, records);
+            if (cnameResult) {
+                return cnameResult;
+            }
+
+            return null;
+        }
 
         const redirectUrl = this.findUrlInTxt(txtRecords);
         if (redirectUrl) {
@@ -144,40 +163,58 @@ class HNSResolver {
                 domain,
                 source: 'hnsdoh',
                 url: redirectUrl,
-                records: { TXT: txtRecords, CNAME: cnameRecords, A: aRecords, AAAA: aaaaRecords }
+                records
             };
         }
 
-        if (cnameRecords.length > 0) {
-            return {
-                domain,
-                source: 'hnsdoh',
-                url: `http://${cnameRecords[0]}`,
-                canonicalName: cnameRecords[0],
-                records: { TXT: txtRecords, CNAME: cnameRecords, A: aRecords, AAAA: aaaaRecords }
-            };
+        const cnameResult = this.buildCnameResult(domain, records);
+        if (cnameResult) {
+            return cnameResult;
         }
 
-        if (aRecords.length > 0 || aaaaRecords.length > 0) {
-            return {
-                domain,
-                source: 'hnsdoh',
-                url: `http://${domain}`,
-                address: aRecords[0] || aaaaRecords[0],
-                addressType: aRecords.length > 0 ? 'A' : 'AAAA',
-                records: { TXT: txtRecords, CNAME: cnameRecords, A: aRecords, AAAA: aaaaRecords }
-            };
+        const addressResult = this.buildAddressResult(domain, records);
+        if (addressResult) {
+            return addressResult;
         }
 
         if (txtRecords.length > 0) {
             return {
                 domain,
                 source: 'hnsdoh',
-                records: { TXT: txtRecords, CNAME: cnameRecords, A: aRecords, AAAA: aaaaRecords }
+                records
             };
         }
 
         return null;
+    }
+
+    buildCnameResult(domain, records) {
+        if (!records.CNAME.length) {
+            return null;
+        }
+
+        return {
+            domain,
+            source: 'hnsdoh',
+            url: `http://${records.CNAME[0]}`,
+            canonicalName: records.CNAME[0],
+            records
+        };
+    }
+
+    buildAddressResult(domain, records) {
+        if (!records.A.length && !records.AAAA.length) {
+            return null;
+        }
+
+        return {
+            domain,
+            source: 'hnsdoh',
+            url: `http://${domain}`,
+            address: records.A[0] || records.AAAA[0],
+            addressType: records.A.length > 0 ? 'A' : 'AAAA',
+            records
+        };
     }
 
     async queryDoh(resolverUrl, domain, typeName, timeout) {

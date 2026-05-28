@@ -34,7 +34,29 @@ Host: setup.skyinclude
 
 ## HeadlessDomains
 
-Names ending in `.agent` and `.chatbot` are looked up through HeadlessDomains. The browser prefers an agent manifest when one exists, then falls back to other published profile URLs.
+Names ending in `.agent` and `.chatbot` can work as both websites and agent identities. For browser navigation, SkyInclude Browser first checks for web-hosting records:
+
+1. A / AAAA records are loaded through the local HNS proxy with the original `Host` header preserved.
+2. CNAME records are used next.
+3. If no web-hosting record exists, the browser falls back to HeadlessDomains agent manifests, skill manifests, and profile URLs.
+
+This lets domains such as `mike.agent`, `pourspout.agent`, and `saltrimmer.agent` open their hosted websites by default while keeping their agent manifests discoverable.
+
+## No-Install Fallback
+
+For users who only need to check whether an HNS site loads in a normal browser, use the public gateway form:
+
+```text
+https://<name>.hns.best
+```
+
+Example:
+
+```text
+https://skyinclude.hns.best
+```
+
+This is a compatibility and onboarding fallback. SkyInclude Browser should still be used when testing native HNS resolution, local proxy behavior, preserved hostnames, cookies, redirects, and HeadlessDomains agent manifests.
 
 ## Debugging
 
@@ -51,4 +73,3 @@ Useful log events:
 - `hns-proxy-request`
 - `load-url`
 - `load-error`
-

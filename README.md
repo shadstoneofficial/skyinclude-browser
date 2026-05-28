@@ -60,6 +60,14 @@ This avoids raw-IP browsing issues where hosted sites return the wrong virtual h
 
 More detail: [docs/hns-resolution.md](docs/hns-resolution.md)
 
+If a tester does not have SkyInclude Browser installed yet, use the public gateway fallback:
+
+```text
+https://<name>.hns.best
+```
+
+Example: `https://skyinclude.hns.best`
+
 ## Useful Test Sites
 
 - `skyinclude`
