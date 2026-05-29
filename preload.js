@@ -7,7 +7,8 @@ const allowedEventChannels = new Set([
     'loading-error',
     'hns-fallback',
     'show-history',
-    'show-settings'
+    'show-settings',
+    'show-status-message'
 ]);
 
 function onAllowedChannel(channel, callback, mapArgs = (...args) => args[0]) {
@@ -58,6 +59,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     showAbout: () => ipcRenderer.invoke('show-about'),
     openLatestRelease: () => ipcRenderer.invoke('open-latest-release'),
     showAppMenu: (anchor) => ipcRenderer.invoke('show-app-menu', anchor),
+    clearCacheAndReload: () => ipcRenderer.invoke('clear-cache-and-reload'),
+    openDebugLog: () => ipcRenderer.invoke('open-debug-log'),
     
     // Event listeners
     onTabSwitched: (callback) => onAllowedChannel('tab-switched', callback),
@@ -67,6 +70,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onHnsFallback: (callback) => onAllowedChannel('hns-fallback', callback),
     onShowHistory: (callback) => onAllowedChannel('show-history', callback, () => undefined),
     onShowSettings: (callback) => onAllowedChannel('show-settings', callback, () => undefined),
+    onShowStatusMessage: (callback) => onAllowedChannel('show-status-message', callback),
     
     // Remove listeners
     removeAllListeners: (channel) => removeAllowedListeners(channel)

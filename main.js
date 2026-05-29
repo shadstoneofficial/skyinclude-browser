@@ -370,6 +370,7 @@ class SkyIncludeBrowser {
                 // Try HNS resolution
                 const hnsResult = await this.resolveHNS(hostname);
                 if (hnsResult) {
+                    this.log('hns-resolution-success', this.getResolutionDiagnostics(hnsResult));
                     return this.buildHNSNavigation(url, hnsResult);
                 }
                 
@@ -499,14 +500,17 @@ class SkyIncludeBrowser {
                 const result = await this.hnsResolver.resolveHNSDomain(domain);
                 if (result) {
                     if (attempt > 1) {
-                        this.log('hns-resolution-retry-success', { domain, attempt });
+                        this.log('hns-resolution-retry-success', {
+                            attempt,
+                            ...this.getResolutionDiagnostics(result)
+                        });
                     }
                     return result;
                 }
 
-                this.log('hns-resolution-empty', { domain, attempt });
+                this.log('hns-resolution-empty', { attempt });
             } catch (error) {
-                this.log('hns-resolution-error', { domain, attempt, message: error.message });
+                this.log('hns-resolution-error', { attempt, message: error.message });
                 console.error('HNS resolution failed:', error);
             }
 
@@ -519,6 +523,32 @@ class SkyIncludeBrowser {
         }
 
         return null;
+    }
+
+    getResolutionDiagnostics(resolution) {
+        if (!resolution || typeof resolution !== 'object') {
+            return { source: 'unknown', route: 'unknown' };
+        }
+
+        const records = resolution.records || {};
+        const counts = Object.fromEntries(['A', 'AAAA', 'CNAME', 'TXT']
+            .map(type => [type, Array.isArray(records[type]) ? records[type].length : 0]));
+        const route = resolution.address
+            ? 'web-address'
+            : resolution.canonicalName
+                ? 'web-cname'
+                : resolution.url
+                    ? 'redirect-url'
+                    : 'records-only';
+
+        return {
+            source: resolution.source || 'unknown',
+            route,
+            addressType: resolution.addressType || null,
+            recordCounts: counts,
+            hasAddress: Boolean(resolution.address),
+            hasUrl: Boolean(resolution.url)
+        };
     }
 
     buildHNSNavigation(originalUrl, resolution) {
@@ -946,6 +976,65 @@ class SkyIncludeBrowser {
 
     openLatestReleasePage() {
         this.openExternalUrl(LATEST_RELEASE_URL);
+        this.sendStatusMessage('If you install an update, fully quit and reopen SkyInclude Browser.', 'info');
+    }
+
+    sendStatusMessage(message, type = 'info') {
+        if (this.mainWindow && !this.mainWindow.isDestroyed()) {
+            this.mainWindow.webContents.send('show-status-message', { message, type });
+        }
+    }
+
+    async openDebugLog() {
+        try {
+            if (!fs.existsSync(this.logFile)) {
+                this.log('debug-log-created');
+            }
+
+            const errorMessage = await shell.openPath(this.logFile);
+            if (errorMessage) {
+                throw new Error(errorMessage);
+            }
+
+            this.log('debug-log-opened');
+            this.sendStatusMessage('Opened SkyInclude debug log.', 'success');
+        } catch (error) {
+            this.log('debug-log-open-error', { message: error.message });
+            this.sendStatusMessage(`Unable to open debug log: ${error.message}`, 'error');
+        }
+    }
+
+    async clearCacheAndReload() {
+        if (typeof this.hnsResolver.clearCache === 'function') {
+            this.hnsResolver.clearCache();
+        }
+
+        this.hnsHostHeaders.clear();
+        this.hnsProxyHosts.clear();
+
+        const sessions = new Set([session.defaultSession]);
+        if (this.currentView?.webContents?.session) {
+            sessions.add(this.currentView.webContents.session);
+        }
+
+        await Promise.all(Array.from(sessions).map(async electronSession => {
+            await electronSession.clearCache();
+        }));
+
+        this.log('cache-clear-reload', {
+            activeTabId: this.activeTabId,
+            hnsCacheCleared: true,
+            sessionCount: sessions.size
+        });
+
+        const activeTab = this.tabs.get(this.activeTabId);
+        if (activeTab) {
+            const reloadUrl = activeTab.url || activeTab.displayUrl || 'skyinclude://home';
+            await this.loadUrlInTab(activeTab.id, reloadUrl);
+            return { reloaded: true, message: 'Cache cleared and current page reloaded.' };
+        }
+
+        return { reloaded: false, message: 'Cache cleared.' };
     }
 
     showAppPopupMenu(anchor = {}) {
@@ -958,6 +1047,14 @@ class SkyIncludeBrowser {
             {
                 label: 'Check for Updates',
                 click: () => this.openLatestReleasePage()
+            },
+            {
+                label: 'Clear Cache / Reload HNS',
+                click: () => {
+                    this.clearCacheAndReload()
+                        .then(result => this.sendStatusMessage(result.message, 'success'))
+                        .catch(error => this.sendStatusMessage(`Unable to clear cache: ${error.message}`, 'error'));
+                }
             },
             { type: 'separator' },
             {
@@ -988,6 +1085,12 @@ class SkyIncludeBrowser {
                     if (this.currentView) {
                         this.currentView.webContents.openDevTools();
                     }
+                }
+            },
+            {
+                label: 'Open Debug Log',
+                click: () => {
+                    this.openDebugLog();
                 }
             },
             { type: 'separator' },
@@ -1071,6 +1174,25 @@ class SkyIncludeBrowser {
                             if (this.currentView) {
                                 this.currentView.webContents.openDevTools();
                             }
+                        }
+                    }
+                ]
+            },
+            {
+                label: 'Troubleshooting',
+                submenu: [
+                    {
+                        label: 'Clear Cache / Reload HNS',
+                        click: () => {
+                            this.clearCacheAndReload()
+                                .then(result => this.sendStatusMessage(result.message, 'success'))
+                                .catch(error => this.sendStatusMessage(`Unable to clear cache: ${error.message}`, 'error'));
+                        }
+                    },
+                    {
+                        label: 'Open Debug Log',
+                        click: () => {
+                            this.openDebugLog();
                         }
                     }
                 ]
@@ -1259,6 +1381,16 @@ class SkyIncludeBrowser {
         ipcMain.handle('open-latest-release', (event) => {
             this.requireTrustedIpcSender(event, 'open-latest-release');
             this.openLatestReleasePage();
+        });
+
+        ipcMain.handle('clear-cache-and-reload', async (event) => {
+            this.requireTrustedIpcSender(event, 'clear-cache-and-reload');
+            return await this.clearCacheAndReload();
+        });
+
+        ipcMain.handle('open-debug-log', async (event) => {
+            this.requireTrustedIpcSender(event, 'open-debug-log');
+            await this.openDebugLog();
         });
 
         ipcMain.handle('show-app-menu', (event, anchor) => {

@@ -21,6 +21,7 @@ class SkyIncludeRenderer {
         this.loadingIndicator = document.getElementById('loading-indicator');
         this.securityIndicator = document.getElementById('security-indicator');
         this.hostingIndicator = document.getElementById('hosting-indicator');
+        this.clearCacheBtn = document.getElementById('clear-cache-btn');
         this.updateBtn = document.getElementById('update-btn');
         this.appVersionBadge = document.getElementById('app-version-badge');
         this.menuVersionLabel = document.getElementById('menu-version-label');
@@ -62,6 +63,9 @@ class SkyIncludeRenderer {
         
         // Tab management
         this.newTabBtn.addEventListener('click', () => this.createNewTab());
+
+        // Troubleshooting
+        this.clearCacheBtn.addEventListener('click', () => this.clearCacheAndReload());
         
         // Update check button
         this.updateBtn.addEventListener('click', () => this.openLatestRelease());
@@ -161,6 +165,10 @@ class SkyIncludeRenderer {
         
         window.electronAPI.onHnsFallback((data) => {
             this.showStatus(`No HNS record found for ${data.domain}, trying traditional DNS`, 'warning');
+        });
+
+        window.electronAPI.onShowStatusMessage((data) => {
+            this.showStatus(data.message, data.type || 'info');
         });
         
         window.electronAPI.onShowHistory(() => {
@@ -675,6 +683,15 @@ class SkyIncludeRenderer {
             await window.electronAPI.openLatestRelease();
         } catch (error) {
             this.showError(`Unable to open releases: ${error.message}`);
+        }
+    }
+
+    async clearCacheAndReload() {
+        try {
+            const result = await window.electronAPI.clearCacheAndReload();
+            this.showStatus(result?.message || 'Cache cleared and HNS reloaded', 'success');
+        } catch (error) {
+            this.showError(`Unable to clear cache: ${error.message}`);
         }
     }
 
