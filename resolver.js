@@ -58,7 +58,7 @@ class HNSResolver {
             const settings = this.getResolverSettings();
 
             if (this.isHeadlessDomain(cleanDomain)) {
-                result = await this.resolveViaDoh(cleanDomain, { preferWebRecords: true });
+                result = await this.resolveHeadlessWebRecords(cleanDomain);
                 if (!result) {
                     result = await this.lookupHeadlessDomain(cleanDomain);
                 }
@@ -85,6 +85,23 @@ class HNSResolver {
             console.error('HNS resolution failed:', error.message);
             return null;
         }
+    }
+
+    async resolveHeadlessWebRecords(domain) {
+        const attempts = 3;
+
+        for (let attempt = 1; attempt <= attempts; attempt += 1) {
+            const result = await this.resolveViaDoh(domain, { preferWebRecords: true });
+            if (result) {
+                return result;
+            }
+
+            if (attempt < attempts) {
+                await new Promise(resolve => setTimeout(resolve, 200 * attempt));
+            }
+        }
+
+        return null;
     }
 
     normalizeDomain(domain) {
