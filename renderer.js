@@ -513,17 +513,30 @@ class SkyIncludeRenderer {
     }
 
     // Modal handling
-    showModal(modalId) {
+    async showModal(modalId) {
         const modal = document.getElementById(modalId);
         if (modal) {
+            await this.setBrowserViewVisible(false);
             modal.classList.remove('hidden');
         }
     }
 
-    hideModal(modalId) {
+    async hideModal(modalId) {
         const modal = document.getElementById(modalId);
         if (modal) {
             modal.classList.add('hidden');
+        }
+
+        if (!document.querySelector('.modal:not(.hidden)')) {
+            await this.setBrowserViewVisible(true);
+        }
+    }
+
+    async setBrowserViewVisible(visible) {
+        try {
+            await window.electronAPI.setBrowserViewVisible(visible);
+        } catch (error) {
+            console.error('Failed to update page view visibility:', error);
         }
     }
 

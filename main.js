@@ -224,6 +224,23 @@ class SkyIncludeBrowser {
         });
     }
 
+    setBrowserViewVisible(visible) {
+        if (!this.mainWindow || !this.currentView) {
+            return;
+        }
+
+        const isAttached = this.mainWindow.getBrowserViews().includes(this.currentView);
+        if (visible && !isAttached) {
+            this.mainWindow.addBrowserView(this.currentView);
+            this.updateCurrentViewBounds();
+            return;
+        }
+
+        if (!visible && isAttached) {
+            this.mainWindow.removeBrowserView(this.currentView);
+        }
+    }
+
     closeTab(tabId) {
         const tab = this.tabs.get(tabId);
         if (!tab) return;
@@ -1381,6 +1398,11 @@ class SkyIncludeBrowser {
         ipcMain.handle('open-latest-release', (event) => {
             this.requireTrustedIpcSender(event, 'open-latest-release');
             this.openLatestReleasePage();
+        });
+
+        ipcMain.handle('set-browser-view-visible', (event, visible) => {
+            this.requireTrustedIpcSender(event, 'set-browser-view-visible');
+            this.setBrowserViewVisible(visible === true);
         });
 
         ipcMain.handle('clear-cache-and-reload', async (event) => {

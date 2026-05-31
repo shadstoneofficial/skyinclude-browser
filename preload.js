@@ -59,6 +59,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     showAbout: () => ipcRenderer.invoke('show-about'),
     openLatestRelease: () => ipcRenderer.invoke('open-latest-release'),
     showAppMenu: (anchor) => ipcRenderer.invoke('show-app-menu', anchor),
+    setBrowserViewVisible: (visible) => ipcRenderer.invoke('set-browser-view-visible', visible),
     clearCacheAndReload: () => ipcRenderer.invoke('clear-cache-and-reload'),
     openDebugLog: () => ipcRenderer.invoke('open-debug-log'),
     
