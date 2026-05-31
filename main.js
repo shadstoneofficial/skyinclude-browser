@@ -214,7 +214,7 @@ class SkyIncludeBrowser {
             return;
         }
 
-        const topChromeHeight = 120;
+        const topChromeHeight = 88;
         const [width, height] = this.mainWindow.getContentSize();
         this.currentView.setBounds({
             x: 0,

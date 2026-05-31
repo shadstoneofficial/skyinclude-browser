@@ -91,7 +91,7 @@ class SkyIncludeRenderer {
         // Modal close buttons
         document.querySelectorAll('.close-modal').forEach(btn => {
             btn.addEventListener('click', (e) => {
-                const modalId = e.target.dataset.modal;
+                const modalId = e.target.closest('.close-modal')?.dataset.modal;
                 this.hideModal(modalId);
             });
         });
@@ -633,7 +633,6 @@ class SkyIncludeRenderer {
         
         // Security settings
         document.getElementById('strict-ssl').checked = settings.strictSSL !== false;
-        document.getElementById('hns-dane').checked = settings.hnsDANE === true;
     }
 
     async saveSettings() {
@@ -642,8 +641,7 @@ class SkyIncludeRenderer {
                 hnsResolutionMode: document.querySelector('input[name="hns-mode"]:checked').value,
                 blockTrackers: document.getElementById('block-trackers').checked,
                 enableJavaScript: document.getElementById('disable-javascript').checked,
-                strictSSL: document.getElementById('strict-ssl').checked,
-                hnsDANE: document.getElementById('hns-dane').checked
+                strictSSL: document.getElementById('strict-ssl').checked
             };
             
             await window.electronAPI.saveSettings(settings);
@@ -660,7 +658,6 @@ class SkyIncludeRenderer {
         document.getElementById('block-trackers').checked = true;
         document.getElementById('disable-javascript').checked = true;
         document.getElementById('strict-ssl').checked = true;
-        document.getElementById('hns-dane').checked = false;
     }
 
     // Developer tools

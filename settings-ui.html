@@ -263,7 +263,7 @@
 
                 <div class="resolver-test">
                     <h3>Test HNS Resolution</h3>
-                    <input type="text" id="testDomain" class="test-domain form-control" placeholder="welcome.nb" value="welcome.nb">
+                    <input type="text" id="testDomain" class="test-domain form-control" placeholder="setup.skyinclude" value="setup.skyinclude">
                     <button id="testResolver" class="btn btn-primary">Test Resolution</button>
                     <div id="testResult" class="test-result" style="display: none;"></div>
                 </div>
@@ -288,13 +288,6 @@
                         <input type="checkbox" id="doNotTrack"> Send "Do Not Track" Headers
                     </label>
                     <p class="setting-description">Tell websites not to track you</p>
-                </div>
-
-                <div class="setting-group">
-                    <label class="setting-label">
-                        <input type="checkbox" id="hnsDANE"> Enable Optional DANE Verification for HNS
-                    </label>
-                    <p class="setting-description">Use DNS-based authentication only for HNS domains that publish compatible records</p>
                 </div>
 
                 <div class="setting-group">
@@ -372,7 +365,6 @@
             document.getElementById('hnsTimeout').value = settings.hnsTimeout || 15000;
             document.getElementById('blockTrackers').checked = settings.blockTrackers !== false;
             document.getElementById('doNotTrack').checked = settings.doNotTrack !== false;
-            document.getElementById('hnsDANE').checked = settings.hnsDANE === true;
             document.getElementById('hnsFallbackToDNS').checked = settings.hnsFallbackToDNS !== false;
             document.getElementById('homepage').value = settings.homepage || 'skyinclude://home';
             document.getElementById('searchEngine').value = settings.searchEngine || 'https://duckduckgo.com/?q=%s';
@@ -391,7 +383,6 @@
                     hnsTimeout: parseInt(document.getElementById('hnsTimeout').value),
                     blockTrackers: document.getElementById('blockTrackers').checked,
                     doNotTrack: document.getElementById('doNotTrack').checked,
-                    hnsDANE: document.getElementById('hnsDANE').checked,
                     hnsFallbackToDNS: document.getElementById('hnsFallbackToDNS').checked,
                     homepage: document.getElementById('homepage').value.trim(),
                     searchEngine: document.getElementById('searchEngine').value.trim()
