@@ -10,6 +10,50 @@ const DNS_TYPES = {
     AAAA: 28
 };
 
+const HNS_BIO_PREFIXES = new Set([
+    'pfp', 'bgcolor', 'bg', 'mail', 'tel', 'tb', 'sx', 'matrix', 'sn',
+    'wa', 'tg', 'link', 'ens', 'onion', 'ipfs', 'pk', 'x', 'nostr',
+    'gh', 'bsky', 'ig', 'fb', 'yt', 'rumble', 'btc', 'hns', 'eth',
+    'sol', 'doge', 'ltc', 'xmr', 'zec', 'dash', 'ext'
+]);
+
+const HNS_BIO_LABELS = {
+    pfp: 'Profile image',
+    bgcolor: 'Background color',
+    bg: 'Background image',
+    mail: 'Email',
+    tel: 'Phone',
+    tb: 'Thunderbird',
+    sx: 'Handshake SLD',
+    matrix: 'Matrix',
+    sn: 'Signal',
+    wa: 'WhatsApp',
+    tg: 'Telegram',
+    link: 'Link',
+    ens: 'ENS',
+    onion: 'Onion',
+    ipfs: 'IPFS',
+    pk: 'Public key',
+    x: 'X',
+    nostr: 'Nostr',
+    gh: 'GitHub',
+    bsky: 'Bluesky',
+    ig: 'Instagram',
+    fb: 'Facebook',
+    yt: 'YouTube',
+    rumble: 'Rumble',
+    btc: 'Bitcoin',
+    hns: 'Handshake',
+    eth: 'Ethereum',
+    sol: 'Solana',
+    doge: 'Dogecoin',
+    ltc: 'Litecoin',
+    xmr: 'Monero',
+    zec: 'Zcash',
+    dash: 'Dash',
+    ext: 'Extension'
+};
+
 class HNSResolver {
     constructor(settingsManager = null) {
         this.settingsManager = settingsManager;
@@ -91,7 +135,7 @@ class HNSResolver {
         const attempts = 3;
 
         for (let attempt = 1; attempt <= attempts; attempt += 1) {
-            const result = await this.resolveViaDoh(domain, { preferWebRecords: true });
+            const result = await this.resolveWebRecordsOnly(domain);
             if (result) {
                 return result;
             }
@@ -102,6 +146,20 @@ class HNSResolver {
         }
 
         return null;
+    }
+
+    async resolveWebRecordsOnly(domain) {
+        const settings = this.getResolverSettings();
+        const [cnameRecords, aRecords, aaaaRecords, hnsProfile] = await Promise.all([
+            this.queryDoh(settings.dohResolver, domain, 'CNAME', settings.timeout).catch(() => []),
+            this.queryDoh(settings.dohResolver, domain, 'A', settings.timeout).catch(() => []),
+            this.queryDoh(settings.dohResolver, domain, 'AAAA', settings.timeout).catch(() => []),
+            this.resolveHnsBioProfile(domain, settings).catch(() => null)
+        ]);
+        const records = { TXT: [], CNAME: cnameRecords, A: aRecords, AAAA: aaaaRecords };
+
+        return this.buildAddressResult(domain, records, hnsProfile)
+            || this.buildCnameResult(domain, records, hnsProfile);
     }
 
     normalizeDomain(domain) {
@@ -123,6 +181,11 @@ class HNSResolver {
 
         try {
             const data = await this.fetchJson(url.toString(), settings.timeout);
+            const hnsProfile = await this.resolveHnsBioProfile(domain, settings);
+            const webResult = await this.resolveWebRecordsOnly(domain);
+            if (webResult) {
+                return webResult;
+            }
             const manifests = data.manifests || {};
             const profile = data.profile || {};
             const integrations = data.integrations || {};
@@ -134,6 +197,7 @@ class HNSResolver {
                     domain,
                     source: 'headlessdomains',
                     url: `https://headlessdomains.com/${domain}`,
+                    hnsProfile,
                     records: { metadata: data }
                 };
             }
@@ -142,6 +206,7 @@ class HNSResolver {
                 domain,
                 source: 'headlessdomains',
                 url: redirectUrl,
+                hnsProfile,
                 records: { metadata: data }
             };
         } catch (error) {
@@ -159,14 +224,15 @@ class HNSResolver {
             this.queryDoh(settings.dohResolver, domain, 'AAAA', settings.timeout).catch(() => [])
         ]);
         const records = { TXT: txtRecords, CNAME: cnameRecords, A: aRecords, AAAA: aaaaRecords };
+        const hnsProfile = this.parseHnsBioProfile(domain, txtRecords);
 
         if (options.preferWebRecords) {
-            const addressResult = this.buildAddressResult(domain, records);
+            const addressResult = this.buildAddressResult(domain, records, hnsProfile);
             if (addressResult) {
                 return addressResult;
             }
 
-            const cnameResult = this.buildCnameResult(domain, records);
+            const cnameResult = this.buildCnameResult(domain, records, hnsProfile);
             if (cnameResult) {
                 return cnameResult;
             }
@@ -180,16 +246,17 @@ class HNSResolver {
                 domain,
                 source: 'hnsdoh',
                 url: redirectUrl,
+                hnsProfile,
                 records
             };
         }
 
-        const cnameResult = this.buildCnameResult(domain, records);
+        const cnameResult = this.buildCnameResult(domain, records, hnsProfile);
         if (cnameResult) {
             return cnameResult;
         }
 
-        const addressResult = this.buildAddressResult(domain, records);
+        const addressResult = this.buildAddressResult(domain, records, hnsProfile);
         if (addressResult) {
             return addressResult;
         }
@@ -198,6 +265,7 @@ class HNSResolver {
             return {
                 domain,
                 source: 'hnsdoh',
+                hnsProfile,
                 records
             };
         }
@@ -205,7 +273,12 @@ class HNSResolver {
         return null;
     }
 
-    buildCnameResult(domain, records) {
+    async resolveHnsBioProfile(domain, settings = this.getResolverSettings()) {
+        const txtRecords = await this.queryDoh(settings.dohResolver, domain, 'TXT', settings.timeout).catch(() => []);
+        return this.parseHnsBioProfile(domain, txtRecords);
+    }
+
+    buildCnameResult(domain, records, hnsProfile = null) {
         if (!records.CNAME.length) {
             return null;
         }
@@ -215,11 +288,12 @@ class HNSResolver {
             source: 'hnsdoh',
             url: `http://${records.CNAME[0]}`,
             canonicalName: records.CNAME[0],
+            hnsProfile,
             records
         };
     }
 
-    buildAddressResult(domain, records) {
+    buildAddressResult(domain, records, hnsProfile = null) {
         if (!records.A.length && !records.AAAA.length) {
             return null;
         }
@@ -230,7 +304,42 @@ class HNSResolver {
             url: `http://${domain}`,
             address: records.A[0] || records.AAAA[0],
             addressType: records.A.length > 0 ? 'A' : 'AAAA',
+            hnsProfile,
             records
+        };
+    }
+
+    parseHnsBioProfile(domain, txtRecords) {
+        const entries = [];
+
+        for (const rawRecord of txtRecords) {
+            const record = String(rawRecord || '').trim().replace(/^"|"$/g, '');
+            const match = record.match(/^([a-z0-9_-]+)\s*[:=]\s*(.+)$/i);
+            if (!match) {
+                continue;
+            }
+
+            const key = match[1].toLowerCase();
+            const value = match[2].trim().replace(/^"|"$/g, '');
+            if (!HNS_BIO_PREFIXES.has(key) || !value) {
+                continue;
+            }
+
+            entries.push({
+                key,
+                label: HNS_BIO_LABELS[key] || key,
+                value
+            });
+        }
+
+        if (!entries.length) {
+            return null;
+        }
+
+        return {
+            standard: 'hns.bio',
+            domain,
+            entries
         };
     }
 

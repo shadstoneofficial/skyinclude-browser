@@ -41,6 +41,9 @@
                     <i class="fas fa-github"></i>
                     <span>Pages</span>
                 </div>
+                <button id="hns-profile-btn" class="hns-profile-button hidden" title="View hns.bio profile records" aria-label="View hns.bio profile records">
+                    <span>bio</span>
+                </button>
                 <input type="text" id="address-bar" class="address-bar" placeholder="Enter URL or search term...">
                 <div id="loading-indicator" class="loading-indicator">
                     <i class="fas fa-spinner fa-spin"></i>
@@ -70,6 +73,17 @@
         <!-- Content Area (BrowserView will be placed here) -->
         <div id="content-area">
             <!-- BrowserView content will be rendered here -->
+        </div>
+
+        <div id="hns-profile-popover" class="hns-profile-popover hidden" role="dialog" aria-label="hns.bio profile records">
+            <div class="hns-profile-header">
+                <div>
+                    <div class="hns-profile-kicker">hns.bio</div>
+                    <div id="hns-profile-domain" class="hns-profile-domain"></div>
+                </div>
+                <button id="close-hns-profile" class="close-profile" title="Close profile records">×</button>
+            </div>
+            <div id="hns-profile-list" class="hns-profile-list"></div>
         </div>
 
         <!-- Modals -->

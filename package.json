@@ -1,6 +1,6 @@
 {
   "name": "skyinclude-browser",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Electron browser with native Handshake (HNS) domain resolution",
   "main": "main.js",
   "scripts": {
@@ -19,7 +19,13 @@
     "check": "node --check main.js && node --check preload.js && node --check renderer.js && node --check resolver.js && node --check settings.js && node --check history.js",
     "test": "npm run check"
   },
-  "keywords": ["browser", "handshake", "hns", "decentralized", "web3"],
+  "keywords": [
+    "browser",
+    "handshake",
+    "hns",
+    "decentralized",
+    "web3"
+  ],
   "author": "SkyInclude Team",
   "license": "MIT",
   "dependencies": {},
@@ -51,7 +57,10 @@
       "target": [
         {
           "target": "dmg",
-          "arch": ["x64", "arm64"]
+          "arch": [
+            "x64",
+            "arm64"
+          ]
         }
       ],
       "icon": "assets/icon.icns"
@@ -60,7 +69,10 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64", "ia32"]
+          "arch": [
+            "x64",
+            "ia32"
+          ]
         }
       ],
       "icon": "assets/icon.ico"
@@ -69,14 +81,19 @@
       "target": [
         {
           "target": "AppImage",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         },
         {
           "target": "deb",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "category": "Network",
+      "icon": "assets/icon.png",
       "maintainer": "SkyInclude Team <shadstoneofficial@users.noreply.github.com>"
     },
     "nsis": {

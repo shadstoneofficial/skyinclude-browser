@@ -21,6 +21,11 @@ class SkyIncludeRenderer {
         this.loadingIndicator = document.getElementById('loading-indicator');
         this.securityIndicator = document.getElementById('security-indicator');
         this.hostingIndicator = document.getElementById('hosting-indicator');
+        this.hnsProfileBtn = document.getElementById('hns-profile-btn');
+        this.hnsProfilePopover = document.getElementById('hns-profile-popover');
+        this.hnsProfileDomain = document.getElementById('hns-profile-domain');
+        this.hnsProfileList = document.getElementById('hns-profile-list');
+        this.closeHnsProfileBtn = document.getElementById('close-hns-profile');
         this.clearCacheBtn = document.getElementById('clear-cache-btn');
         this.updateBtn = document.getElementById('update-btn');
         this.appVersionBadge = document.getElementById('app-version-badge');
@@ -66,6 +71,13 @@ class SkyIncludeRenderer {
 
         // Troubleshooting
         this.clearCacheBtn.addEventListener('click', () => this.clearCacheAndReload());
+
+        this.hnsProfileBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this.toggleHnsProfilePopover();
+        });
+
+        this.closeHnsProfileBtn.addEventListener('click', () => this.hideHnsProfilePopover());
         
         // Update check button
         this.updateBtn.addEventListener('click', () => this.openLatestRelease());
@@ -105,7 +117,7 @@ class SkyIncludeRenderer {
             if (!this.menuDropdown.contains(e.target) && !this.menuBtn.contains(e.target)) {
                 this.hideMenu();
             }
-            
+
             if (e.target.classList.contains('modal')) {
                 this.hideModal(e.target.id);
             }
@@ -154,6 +166,10 @@ class SkyIncludeRenderer {
         window.electronAPI.onTabClosed((tabId) => {
             this.removeTabFromUI(tabId);
         });
+
+        window.electronAPI.onTabUpdated((data) => {
+            this.updateTabState(data);
+        });
         
         window.electronAPI.onLoadingChanged((data) => {
             this.updateLoadingState(data);
@@ -191,6 +207,12 @@ class SkyIncludeRenderer {
                 if (activeTab) {
                     this.activeTabId = activeTab.id;
                     this.updateAddressBar(activeTab.url);
+                    this.updateSecurityIndicator(activeTab.url, activeTab.hostingProvider);
+                    this.updateHostingIndicator(activeTab.hostingProvider);
+                    this.updateHnsProfileIndicator(activeTab.hnsProfile);
+                    if (activeTab.url === 'skyinclude://home') {
+                        this.focusAddressBar();
+                    }
                 }
             }
         } catch (error) {
@@ -263,6 +285,7 @@ class SkyIncludeRenderer {
             const tabId = await window.electronAPI.newTab(url);
             const tabs = await window.electronAPI.getTabs();
             this.renderTabs(tabs);
+            this.focusAddressBar();
             return tabId;
         } catch (error) {
             console.error('Failed to create new tab:', error);
@@ -292,8 +315,12 @@ class SkyIncludeRenderer {
         this.updateAddressBar(data.url);
         this.updateNavigationButtons(data.canGoBack, data.canGoForward);
         this.showLoading(data.loading);
-        this.updateSecurityIndicator(data.url);
+        this.updateSecurityIndicator(data.url, data.hostingProvider);
         this.updateHostingIndicator(data.hostingProvider);
+        this.updateHnsProfileIndicator(data.hnsProfile);
+        if (data.url === 'skyinclude://home') {
+            this.focusAddressBar();
+        }
     }
 
     updateAddressBar(url) {
@@ -312,10 +339,15 @@ class SkyIncludeRenderer {
             if (!data.loading && data.url) {
                 this.updateAddressBar(data.url);
                 this.updateNavigationButtons(data.canGoBack, data.canGoForward);
+                this.updateSecurityIndicator(data.url, data.hostingProvider);
             }
 
             if (Object.prototype.hasOwnProperty.call(data, 'hostingProvider')) {
                 this.updateHostingIndicator(data.hostingProvider);
+            }
+
+            if (Object.prototype.hasOwnProperty.call(data, 'hnsProfile')) {
+                this.updateHnsProfileIndicator(data.hnsProfile);
             }
         }
         
@@ -323,12 +355,25 @@ class SkyIncludeRenderer {
         const tab = this.tabs.get(data.tabId);
         if (tab) {
             tab.loading = data.loading;
+            if (Object.prototype.hasOwnProperty.call(data, 'hostingProvider')) {
+                tab.hostingProvider = data.hostingProvider;
+            }
+            if (Object.prototype.hasOwnProperty.call(data, 'hnsProfile')) {
+                tab.hnsProfile = data.hnsProfile;
+            }
             this.updateTabLoadingUI(data.tabId, data.loading);
         }
     }
 
-    updateSecurityIndicator(url) {
+    updateSecurityIndicator(url, hostingProvider = null) {
         const icon = this.securityIndicator.querySelector('i');
+
+        if (hostingProvider === 'github-pages') {
+            icon.className = 'fas fa-github';
+            this.securityIndicator.className = 'security-indicator hosting-github';
+            this.securityIndicator.title = 'Hosted on GitHub Pages';
+            return;
+        }
         
         if (url.startsWith('https://')) {
             icon.className = 'fas fa-lock';
@@ -343,6 +388,8 @@ class SkyIncludeRenderer {
             icon.className = 'fas fa-globe';
             this.securityIndicator.className = 'security-indicator';
         }
+
+        this.securityIndicator.title = '';
     }
 
     updateHostingIndicator(hostingProvider) {
@@ -386,7 +433,7 @@ class SkyIncludeRenderer {
         favicon.className = 'tab-favicon';
 
         const faviconIcon = document.createElement('i');
-        faviconIcon.className = 'fas fa-globe';
+        faviconIcon.className = this.getTabIconClass(tab);
         favicon.appendChild(faviconIcon);
 
         const title = document.createElement('div');
@@ -431,9 +478,91 @@ class SkyIncludeRenderer {
             if (loading) {
                 favicon.className = 'fas fa-spinner fa-spin';
             } else {
-                favicon.className = 'fas fa-globe';
+                favicon.className = this.getTabIconClass(this.tabs.get(tabId));
             }
         }
+    }
+
+    updateTabState(data) {
+        const tab = this.tabs.get(data.tabId);
+        if (!tab) {
+            return;
+        }
+
+        Object.assign(tab, data);
+
+        const tabElement = this.tabsContainer.querySelector(`[data-tab-id="${data.tabId}"]`);
+        if (tabElement) {
+            tabElement.classList.toggle('active', data.active === true);
+            const title = tabElement.querySelector('.tab-title');
+            if (title) {
+                title.textContent = this.getTabTitle(tab);
+            }
+
+            if (!tab.loading) {
+                const favicon = tabElement.querySelector('.tab-favicon i');
+                if (favicon) {
+                    favicon.className = this.getTabIconClass(tab);
+                }
+            }
+        }
+
+        if (data.active === true || data.tabId === this.activeTabId) {
+            this.activeTabId = data.tabId;
+            this.updateAddressBar(tab.url);
+            this.updateNavigationButtons(tab.canGoBack, tab.canGoForward);
+            this.updateSecurityIndicator(tab.url, tab.hostingProvider);
+            this.updateHostingIndicator(tab.hostingProvider);
+            this.updateHnsProfileIndicator(tab.hnsProfile);
+        }
+    }
+
+    updateHnsProfileIndicator(profile) {
+        this.currentHnsProfile = profile && Array.isArray(profile.entries) && profile.entries.length > 0 ? profile : null;
+        if (this.currentHnsProfile) {
+            this.hnsProfileBtn.classList.remove('hidden');
+            this.hnsProfileBtn.title = `View hns.bio records for ${this.currentHnsProfile.domain}`;
+            return;
+        }
+
+        this.hnsProfileBtn.classList.add('hidden');
+        this.hideHnsProfilePopover();
+    }
+
+    async toggleHnsProfilePopover() {
+        if (!this.currentHnsProfile) {
+            return;
+        }
+
+        const rect = this.hnsProfileBtn.getBoundingClientRect();
+        await window.electronAPI.showHnsProfilePopover({
+            profile: this.currentHnsProfile,
+            anchor: {
+                left: rect.left,
+                bottom: rect.bottom
+            }
+        });
+    }
+
+    async hideHnsProfilePopover() {
+        this.hnsProfilePopover.classList.add('hidden');
+        await window.electronAPI.hideHnsProfilePopover();
+    }
+
+    getTabIconClass(tab) {
+        if (tab?.loading) {
+            return 'fas fa-spinner fa-spin';
+        }
+
+        if (tab?.hostingProvider === 'github-pages') {
+            return 'fas fa-github';
+        }
+
+        if (tab?.url === 'skyinclude://home') {
+            return 'fas fa-home';
+        }
+
+        return 'fas fa-globe';
     }
 
     getTabTitle(tab) {
@@ -451,6 +580,13 @@ class SkyIncludeRenderer {
         } catch {
             return tab.url.substring(0, 30) + (tab.url.length > 30 ? '...' : '');
         }
+    }
+
+    focusAddressBar() {
+        setTimeout(() => {
+            this.addressBar.focus();
+            this.addressBar.select();
+        }, 0);
     }
 
     // Menu handling

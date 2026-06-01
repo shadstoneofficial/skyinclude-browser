@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 const allowedEventChannels = new Set([
     'tab-switched',
     'tab-closed',
+    'tab-updated',
     'loading-changed',
     'loading-error',
     'hns-fallback',
@@ -59,6 +60,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     showAbout: () => ipcRenderer.invoke('show-about'),
     openLatestRelease: () => ipcRenderer.invoke('open-latest-release'),
     showAppMenu: (anchor) => ipcRenderer.invoke('show-app-menu', anchor),
+    showHnsProfilePopover: (payload) => ipcRenderer.invoke('show-hns-profile-popover', payload),
+    hideHnsProfilePopover: () => ipcRenderer.invoke('hide-hns-profile-popover'),
     setBrowserViewVisible: (visible) => ipcRenderer.invoke('set-browser-view-visible', visible),
     clearCacheAndReload: () => ipcRenderer.invoke('clear-cache-and-reload'),
     openDebugLog: () => ipcRenderer.invoke('open-debug-log'),
@@ -66,6 +69,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // Event listeners
     onTabSwitched: (callback) => onAllowedChannel('tab-switched', callback),
     onTabClosed: (callback) => onAllowedChannel('tab-closed', callback),
+    onTabUpdated: (callback) => onAllowedChannel('tab-updated', callback),
     onLoadingChanged: (callback) => onAllowedChannel('loading-changed', callback),
     onLoadingError: (callback) => onAllowedChannel('loading-error', callback),
     onHnsFallback: (callback) => onAllowedChannel('hns-fallback', callback),

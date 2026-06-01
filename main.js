@@ -23,6 +23,7 @@ class SkyIncludeBrowser {
         this.hnsProxyHosts = new Map();
         this.hnsProxyPort = null;
         this.hnsProxyServer = null;
+        this.hnsProfilePopover = null;
         this.proxyConfiguredSessions = new WeakSet();
         this.githubPagesAddresses = new Set([
             '185.199.108.153',
@@ -88,10 +89,12 @@ class SkyIncludeBrowser {
         });
 
         this.mainWindow.on('resize', () => this.updateCurrentViewBounds());
+        this.mainWindow.on('move', () => this.closeHnsProfilePopover());
         this.mainWindow.on('maximize', () => this.updateCurrentViewBounds());
         this.mainWindow.on('unmaximize', () => this.updateCurrentViewBounds());
         this.mainWindow.on('enter-full-screen', () => this.updateCurrentViewBounds());
         this.mainWindow.on('leave-full-screen', () => this.updateCurrentViewBounds());
+        this.mainWindow.on('closed', () => this.closeHnsProfilePopover());
 
         // Create initial tab with home page
         await this.createNewTab('skyinclude://home');
@@ -165,6 +168,14 @@ class SkyIncludeBrowser {
             this.updateTabUrlFromNavigation(tabId, navigationUrl);
         });
 
+        view.webContents.on('page-title-updated', (event, title) => {
+            this.updateTabTitle(tabId, title);
+        });
+
+        view.webContents.on('did-finish-load', () => {
+            this.updateTabTitle(tabId, view.webContents.getTitle());
+        });
+
         this.tabs.set(tabId, {
             id: tabId,
             view: view,
@@ -173,7 +184,8 @@ class SkyIncludeBrowser {
             loading: false,
             canGoBack: false,
             canGoForward: false,
-            hostingProvider: null
+            hostingProvider: null,
+            hnsProfile: null
         });
 
         this.switchToTab(tabId);
@@ -205,7 +217,83 @@ class SkyIncludeBrowser {
             canGoBack: tab.canGoBack,
             canGoForward: tab.canGoForward,
             loading: tab.loading,
-            hostingProvider: tab.hostingProvider
+            hostingProvider: tab.hostingProvider,
+            hnsProfile: tab.hnsProfile
+        });
+    }
+
+    updateTabTitle(tabId, title) {
+        const tab = this.tabs.get(tabId);
+        if (!tab) return;
+        if (tab.url === 'skyinclude://home' || tab.displayUrl === 'skyinclude://home') {
+            tab.title = 'New Tab';
+            return;
+        }
+
+        const cleanTitle = this.cleanPageTitle(title);
+        if (!cleanTitle || cleanTitle === tab.title) {
+            return;
+        }
+
+        tab.title = cleanTitle;
+        this.sendTabUpdated(tab);
+    }
+
+    cleanPageTitle(title) {
+        if (typeof title !== 'string') {
+            return '';
+        }
+
+        const cleanTitle = title.trim().replace(/\s+/g, ' ');
+        if (!cleanTitle || cleanTitle === 'SkyInclude Browser') {
+            return '';
+        }
+
+        return cleanTitle;
+    }
+
+    getHistoryTitle(tab) {
+        const title = this.cleanPageTitle(tab?.title);
+        return title && title !== 'New Tab' ? title : '';
+    }
+
+    getFallbackTitleForUrl(displayUrl) {
+        if (!displayUrl || displayUrl === 'skyinclude://home') {
+            return 'New Tab';
+        }
+
+        try {
+            const parsedUrl = new URL(displayUrl.includes('://') ? displayUrl : `http://${displayUrl}`);
+            return parsedUrl.hostname || displayUrl;
+        } catch (error) {
+            return String(displayUrl).slice(0, 40);
+        }
+    }
+
+    getHostnameForDisplayUrl(displayUrl) {
+        try {
+            const parsedUrl = new URL(displayUrl.includes('://') ? displayUrl : `http://${displayUrl}`);
+            return parsedUrl.hostname;
+        } catch (error) {
+            return '';
+        }
+    }
+
+    sendTabUpdated(tab) {
+        if (!this.mainWindow || this.mainWindow.isDestroyed()) {
+            return;
+        }
+
+        this.mainWindow.webContents.send('tab-updated', {
+            tabId: tab.id,
+            url: tab.url,
+            title: tab.title,
+            loading: tab.loading,
+            hostingProvider: tab.hostingProvider,
+            hnsProfile: tab.hnsProfile,
+            canGoBack: tab.view.webContents.canGoBack(),
+            canGoForward: tab.view.webContents.canGoForward(),
+            active: tab.id === this.activeTabId
         });
     }
 
@@ -273,7 +361,8 @@ class SkyIncludeBrowser {
         try {
             tab.loading = true;
             tab.hostingProvider = null;
-            this.mainWindow.webContents.send('loading-changed', { tabId, loading: true, hostingProvider: null });
+            tab.hnsProfile = null;
+            this.mainWindow.webContents.send('loading-changed', { tabId, loading: true, hostingProvider: null, hnsProfile: null });
 
             let finalUrl = inputUrl;
             let loadOptions = {};
@@ -289,6 +378,7 @@ class SkyIncludeBrowser {
                 loadOptions = resolved.options || {};
                 tab.displayUrl = resolved.displayUrl || inputUrl;
                 tab.hostingProvider = resolved.hostingProvider || null;
+                tab.hnsProfile = resolved.hnsProfile || null;
 
                 if (resolved.proxyHost && resolved.resolvedHost) {
                     this.hnsProxyHosts.set(resolved.proxyHost, resolved.resolvedHost);
@@ -320,12 +410,17 @@ class SkyIncludeBrowser {
                 }
             }
 
+            tab.url = tab.displayUrl || inputUrl;
+            tab.title = this.getFallbackTitleForUrl(tab.url);
+            this.sendTabUpdated(tab);
+
             this.log('load-url', { tabId, inputUrl, finalUrl, loadOptions });
             tab.pendingLoadUrl = finalUrl;
             await tab.view.webContents.loadURL(finalUrl, loadOptions);
             delete tab.pendingLoadUrl;
             
             tab.url = tab.displayUrl || inputUrl; // Keep original URL for display
+            this.updateTabTitle(tabId, tab.view.webContents.getTitle());
             tab.loading = false;
 
             // Update navigation state
@@ -338,11 +433,13 @@ class SkyIncludeBrowser {
                 url: tab.url,
                 canGoBack: tab.canGoBack,
                 canGoForward: tab.canGoForward,
-                hostingProvider: tab.hostingProvider
+                hostingProvider: tab.hostingProvider,
+                hnsProfile: tab.hnsProfile
             });
+            this.sendTabUpdated(tab);
 
             // Add to history
-            this.addToHistory(inputUrl, tab.title);
+            this.addToHistory(tab.url, this.getHistoryTitle(tab));
 
         } catch (error) {
             delete tab.pendingLoadUrl;
@@ -430,36 +527,49 @@ class SkyIncludeBrowser {
             const parsedUrl = new URL(this.normalizeGatewayUrl(navigationUrl));
             if (parsedUrl.protocol === 'file:' && parsedUrl.pathname.endsWith('/announcement.html')) {
                 tab.url = 'skyinclude://home';
+                tab.title = 'New Tab';
                 tab.hostingProvider = null;
+                tab.hnsProfile = null;
                 this.mainWindow.webContents.send('loading-changed', {
                     tabId,
                     loading: false,
                     url: tab.url,
                     canGoBack: tab.view.webContents.canGoBack(),
                     canGoForward: tab.view.webContents.canGoForward(),
-                    hostingProvider: tab.hostingProvider
+                    hostingProvider: tab.hostingProvider,
+                    hnsProfile: tab.hnsProfile
                 });
+                this.sendTabUpdated(tab);
                 return;
             }
 
             if (this.isIPAddress(parsedUrl.hostname)) {
                 tab.hostingProvider = null;
+                tab.hnsProfile = null;
                 return;
             }
 
             if (!this.isHNSDomain(parsedUrl.hostname)) {
                 tab.hostingProvider = null;
+                tab.hnsProfile = null;
             }
 
+            const previousHost = this.getHostnameForDisplayUrl(tab.url);
             tab.url = parsedUrl.toString().replace(/^http:\/\//, '');
+            const nextHost = this.getHostnameForDisplayUrl(tab.url);
+            if (!tab.title || tab.title === 'New Tab' || (previousHost && nextHost && previousHost !== nextHost)) {
+                tab.title = this.getFallbackTitleForUrl(tab.url);
+            }
             this.mainWindow.webContents.send('loading-changed', {
                 tabId,
                 loading: false,
                 url: tab.url,
                 canGoBack: tab.view.webContents.canGoBack(),
                 canGoForward: tab.view.webContents.canGoForward(),
-                hostingProvider: tab.hostingProvider
+                hostingProvider: tab.hostingProvider,
+                hnsProfile: tab.hnsProfile
             });
+            this.sendTabUpdated(tab);
         } catch (error) {
             this.log('navigation-url-update-error', { tabId, navigationUrl, message: error.message });
         }
@@ -563,6 +673,7 @@ class SkyIncludeBrowser {
             route,
             addressType: resolution.addressType || null,
             recordCounts: counts,
+            hasHnsBioProfile: Boolean(resolution.hnsProfile?.entries?.length),
             hasAddress: Boolean(resolution.address),
             hasUrl: Boolean(resolution.url)
         };
@@ -577,7 +688,7 @@ class SkyIncludeBrowser {
         }
 
         if (resolution.url && !resolution.address) {
-            return { url: resolution.url, hostingProvider };
+            return { url: resolution.url, hostingProvider, hnsProfile: resolution.hnsProfile || null };
         }
 
         if (resolution.address) {
@@ -590,12 +701,13 @@ class SkyIncludeBrowser {
                 proxyHost: resolution.domain,
                 resolvedHost: resolution.address,
                 bypassCache: true,
-                hostingProvider
+                hostingProvider,
+                hnsProfile: resolution.hnsProfile || null
             };
         }
 
         if (resolution.url) {
-            return { url: resolution.url, hostingProvider };
+            return { url: resolution.url, hostingProvider, hnsProfile: resolution.hnsProfile || null };
         }
 
         throw new Error(`No browsable HNS records found for ${resolution.domain}`);
@@ -612,6 +724,7 @@ class SkyIncludeBrowser {
             hnsHostHeader: parsedUrl.hostname,
             proxyHost: parsedUrl.hostname,
             hostingProvider: null,
+            hnsProfile: null,
             bypassCache: true
         };
     }
@@ -996,6 +1109,141 @@ class SkyIncludeBrowser {
         this.sendStatusMessage('If you install an update, fully quit and reopen SkyInclude Browser.', 'info');
     }
 
+    showHnsProfilePopover(payload = {}) {
+        if (!this.mainWindow || this.mainWindow.isDestroyed()) {
+            return;
+        }
+
+        const profile = this.sanitizeHnsProfile(payload.profile);
+        if (!profile) {
+            this.closeHnsProfilePopover();
+            return;
+        }
+
+        const anchor = payload.anchor && typeof payload.anchor === 'object' ? payload.anchor : {};
+        const parentBounds = this.mainWindow.getBounds();
+        const width = 340;
+        const height = Math.min(520, 110 + profile.entries.length * 70);
+        const x = Math.min(
+            Math.max(parentBounds.x + 12, parentBounds.x + Math.round(Number(anchor.left) || 0) - 24),
+            parentBounds.x + parentBounds.width - width - 12
+        );
+        const y = Math.min(
+            parentBounds.y + parentBounds.height - height - 12,
+            parentBounds.y + Math.round(Number(anchor.bottom) || 90) + 8
+        );
+
+        this.closeHnsProfilePopover();
+        this.hnsProfilePopover = new BrowserWindow({
+            parent: this.mainWindow,
+            x,
+            y,
+            width,
+            height,
+            frame: false,
+            resizable: false,
+            minimizable: false,
+            maximizable: false,
+            fullscreenable: false,
+            skipTaskbar: true,
+            show: false,
+            webPreferences: {
+                nodeIntegration: false,
+                contextIsolation: true,
+                sandbox: true
+            }
+        });
+
+        this.hnsProfilePopover.on('blur', () => this.closeHnsProfilePopover());
+        this.hnsProfilePopover.on('closed', () => {
+            this.hnsProfilePopover = null;
+        });
+
+        this.hnsProfilePopover.loadURL(this.buildHnsProfilePopoverDataUrl(profile)).catch(error => {
+            this.log('hns-profile-popover-error', { message: error.message });
+        });
+        this.hnsProfilePopover.once('ready-to-show', () => {
+            if (this.hnsProfilePopover && !this.hnsProfilePopover.isDestroyed()) {
+                this.hnsProfilePopover.show();
+            }
+        });
+    }
+
+    closeHnsProfilePopover() {
+        if (this.hnsProfilePopover && !this.hnsProfilePopover.isDestroyed()) {
+            this.hnsProfilePopover.close();
+        }
+        this.hnsProfilePopover = null;
+    }
+
+    sanitizeHnsProfile(profile) {
+        if (!profile || !Array.isArray(profile.entries) || !profile.entries.length) {
+            return null;
+        }
+
+        const entries = profile.entries.slice(0, 16).map(entry => ({
+            label: String(entry.label || entry.key || 'Record').slice(0, 40),
+            value: String(entry.value || '').slice(0, 500)
+        })).filter(entry => entry.value);
+
+        return entries.length ? {
+            domain: String(profile.domain || 'HNS profile').slice(0, 120),
+            entries
+        } : null;
+    }
+
+    buildHnsProfilePopoverDataUrl(profile) {
+        const rows = profile.entries.map(entry => `
+            <div class="row">
+                <div class="label">${this.escapeHtml(entry.label)}</div>
+                <div class="value">${this.escapeHtml(entry.value)}</div>
+            </div>
+        `).join('');
+
+        const html = `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+* { box-sizing: border-box; }
+body { margin: 0; background: #fff; color: #111827; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; overflow: hidden; }
+.card { border: 1px solid #d1d5db; border-radius: 8px; box-shadow: 0 12px 28px rgba(15, 23, 42, .22); height: 100vh; overflow: hidden; }
+.header { align-items: center; background: #f8fafc; border-bottom: 1px solid #e5e7eb; display: flex; justify-content: space-between; padding: 14px 16px; }
+.kicker { color: #15803d; font-size: 12px; font-weight: 800; text-transform: uppercase; }
+.domain { color: #111827; font-size: 19px; font-weight: 800; line-height: 1.2; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
+button { align-items: center; background: transparent; border: 0; border-radius: 4px; color: #6b7280; cursor: pointer; display: flex; font-size: 28px; height: 34px; justify-content: center; width: 34px; }
+button:hover { background: #eef2f7; color: #374151; }
+.list { max-height: calc(100vh - 78px); overflow-y: auto; padding: 6px 0; }
+.row { border-bottom: 1px solid #f3f4f6; padding: 11px 16px; }
+.row:last-child { border-bottom: 0; }
+.label { color: #64748b; font-size: 12px; font-weight: 800; margin-bottom: 6px; text-transform: uppercase; }
+.value { color: #111827; font-size: 15px; line-height: 1.35; overflow-wrap: anywhere; }
+</style>
+</head>
+<body>
+<div class="card">
+    <div class="header">
+        <div><div class="kicker">hns.bio</div><div class="domain">${this.escapeHtml(profile.domain)}</div></div>
+        <button onclick="window.close()" title="Close">×</button>
+    </div>
+    <div class="list">${rows}</div>
+</div>
+</body>
+</html>`;
+
+        return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
+    }
+
+    escapeHtml(value) {
+        return String(value).replace(/[&<>"']/g, character => ({
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#39;'
+        })[character]);
+    }
+
     sendStatusMessage(message, type = 'info') {
         if (this.mainWindow && !this.mainWindow.isDestroyed()) {
             this.mainWindow.webContents.send('show-status-message', { message, type });
@@ -1344,6 +1592,7 @@ class SkyIncludeBrowser {
                 title: tab.title,
                 loading: tab.loading,
                 hostingProvider: tab.hostingProvider,
+                hnsProfile: tab.hnsProfile,
                 active: tab.id === this.activeTabId
             }));
         });
@@ -1398,6 +1647,16 @@ class SkyIncludeBrowser {
         ipcMain.handle('open-latest-release', (event) => {
             this.requireTrustedIpcSender(event, 'open-latest-release');
             this.openLatestReleasePage();
+        });
+
+        ipcMain.handle('show-hns-profile-popover', (event, payload) => {
+            this.requireTrustedIpcSender(event, 'show-hns-profile-popover');
+            this.showHnsProfilePopover(payload);
+        });
+
+        ipcMain.handle('hide-hns-profile-popover', (event) => {
+            this.requireTrustedIpcSender(event, 'hide-hns-profile-popover');
+            this.closeHnsProfilePopover();
         });
 
         ipcMain.handle('set-browser-view-visible', (event, visible) => {
