@@ -53,6 +53,8 @@ Do not commit `.p12` files, app-specific passwords, or other signing material. A
 
 The macOS build config enables Hardened Runtime and Electron Builder notarization. The release workflow deliberately keeps certificate auto-discovery disabled for Windows and Linux jobs, but not for the macOS job.
 
+Apple notarization can take longer than ordinary packaging, so the macOS signing step has a longer timeout than the Windows and Linux package builds. If a run times out while waiting on `xcrun notarytool submit --wait`, the certificate import and code signing may still be correct; rerun after checking Apple's notarization service status.
+
 ## Manual Build Run
 
 ```bash
