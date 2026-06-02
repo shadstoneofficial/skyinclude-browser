@@ -29,6 +29,30 @@ Expected artifacts:
 - `SHA256SUMS.txt` for each platform artifact set
 - GitHub artifact attestations associated with the workflow run
 
+## macOS Developer ID Signing
+
+macOS release builds are intended to be signed with a Developer ID Application certificate and notarized by Apple. Electron Builder uses the repository secrets below during the macOS job:
+
+```text
+CSC_LINK
+CSC_KEY_PASSWORD
+APPLE_ID
+APPLE_APP_SPECIFIC_PASSWORD
+APPLE_TEAM_ID
+```
+
+Expected meanings:
+
+- `CSC_LINK`: base64-encoded `.p12` export of the Developer ID Application certificate and private key
+- `CSC_KEY_PASSWORD`: password used when exporting the `.p12`
+- `APPLE_ID`: Apple Developer account email used for notarization
+- `APPLE_APP_SPECIFIC_PASSWORD`: Apple app-specific password for notarization
+- `APPLE_TEAM_ID`: Apple Developer Team ID, for example `2AT6KFBL29`
+
+Do not commit `.p12` files, app-specific passwords, or other signing material. Add them only as GitHub Actions secrets.
+
+The macOS build config enables Hardened Runtime and Electron Builder notarization. The release workflow deliberately keeps certificate auto-discovery disabled for Windows and Linux jobs, but not for the macOS job.
+
 ## Manual Build Run
 
 ```bash
@@ -107,7 +131,7 @@ gh release verify-asset "${RELEASE_TAG}" SkyInclude.Browser.Setup.0.1.1.exe -R s
 
 ## Current Signing Notes
 
-The macOS build currently disables automatic certificate discovery in CI. That allows unsigned DMGs to build reproducibly, but public users may see macOS security prompts until Developer ID signing and notarization are configured.
+The macOS build signs and notarizes when the required Apple Developer ID secrets are present in GitHub Actions. If those secrets are missing or invalid, the macOS job should fail rather than publish unsigned public DMGs.
 
 Windows packages are also unsigned until a code-signing certificate is configured.
 
