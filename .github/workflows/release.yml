@@ -53,7 +53,35 @@ jobs:
       - name: Run syntax checks
         run: npm test
 
+      - name: Build signed and notarized macOS package
+        if: matrix.platform.name == 'macOS'
+        timeout-minutes: 180
+        run: npm run ${{ matrix.platform.build-script }}
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          DEBUG: electron-builder,electron-notarize*
+
+      - name: Verify macOS code signature
+        if: matrix.platform.name == 'macOS'
+        shell: bash
+        run: |
+          mapfile -t app_paths < <(find dist -maxdepth 3 -name "SkyInclude Browser.app" -type d | sort)
+          if [ "${#app_paths[@]}" -eq 0 ]; then
+            echo "No macOS app bundle found in dist" >&2
+            exit 1
+          fi
+
+          for app_path in "${app_paths[@]}"; do
+            codesign --verify --deep --strict --verbose=2 "$app_path"
+            spctl --assess --type execute --verbose "$app_path"
+          done
+
       - name: Build platform package
+        if: matrix.platform.name != 'macOS'
         run: npm run ${{ matrix.platform.build-script }}
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
