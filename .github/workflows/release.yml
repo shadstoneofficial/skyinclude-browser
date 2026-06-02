@@ -55,6 +55,7 @@ jobs:
 
       - name: Build signed and notarized macOS package
         if: matrix.platform.name == 'macOS'
+        timeout-minutes: 30
         run: npm run ${{ matrix.platform.build-script }}
         env:
           CSC_LINK: ${{ secrets.CSC_LINK }}
@@ -62,6 +63,7 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          DEBUG: electron-builder,electron-notarize*
 
       - name: Verify macOS code signature
         if: matrix.platform.name == 'macOS'
