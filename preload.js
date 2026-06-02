@@ -62,6 +62,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     showAppMenu: (anchor) => ipcRenderer.invoke('show-app-menu', anchor),
     showHnsProfilePopover: (payload) => ipcRenderer.invoke('show-hns-profile-popover', payload),
     hideHnsProfilePopover: () => ipcRenderer.invoke('hide-hns-profile-popover'),
+    showEditContextMenu: () => ipcRenderer.invoke('show-edit-context-menu'),
     setBrowserViewVisible: (visible) => ipcRenderer.invoke('set-browser-view-visible', visible),
     clearCacheAndReload: () => ipcRenderer.invoke('clear-cache-and-reload'),
     openDebugLog: () => ipcRenderer.invoke('open-debug-log'),

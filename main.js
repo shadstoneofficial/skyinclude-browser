@@ -1,4 +1,4 @@
-const { app, BrowserWindow, BrowserView, ipcMain, Menu, dialog, shell, session } = require('electron');
+const { app, BrowserWindow, BrowserView, ipcMain, Menu, dialog, shell, session, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { URL, fileURLToPath } = require('url');
@@ -172,6 +172,14 @@ class SkyIncludeBrowser {
             this.updateTabTitle(tabId, title);
         });
 
+        view.webContents.on('page-favicon-updated', (event, favicons) => {
+            this.updateTabFavicon(tabId, favicons);
+        });
+
+        view.webContents.on('context-menu', (event, params) => {
+            this.showPageContextMenu(view.webContents, params);
+        });
+
         view.webContents.on('did-finish-load', () => {
             this.updateTabTitle(tabId, view.webContents.getTitle());
         });
@@ -184,6 +192,7 @@ class SkyIncludeBrowser {
             loading: false,
             canGoBack: false,
             canGoForward: false,
+            favicon: null,
             hostingProvider: null,
             hnsProfile: null
         });
@@ -217,6 +226,7 @@ class SkyIncludeBrowser {
             canGoBack: tab.canGoBack,
             canGoForward: tab.canGoForward,
             loading: tab.loading,
+            favicon: tab.favicon,
             hostingProvider: tab.hostingProvider,
             hnsProfile: tab.hnsProfile
         });
@@ -236,6 +246,23 @@ class SkyIncludeBrowser {
         }
 
         tab.title = cleanTitle;
+        this.sendTabUpdated(tab);
+    }
+
+    updateTabFavicon(tabId, favicons = []) {
+        const tab = this.tabs.get(tabId);
+        if (!tab || !Array.isArray(favicons)) return;
+
+        const favicon = favicons.find(candidate => {
+            if (typeof candidate !== 'string' || !candidate) return false;
+            return /^(https?:|data:|file:)/.test(candidate);
+        });
+
+        if (!favicon || favicon === tab.favicon) {
+            return;
+        }
+
+        tab.favicon = favicon;
         this.sendTabUpdated(tab);
     }
 
@@ -289,6 +316,7 @@ class SkyIncludeBrowser {
             url: tab.url,
             title: tab.title,
             loading: tab.loading,
+            favicon: tab.favicon,
             hostingProvider: tab.hostingProvider,
             hnsProfile: tab.hnsProfile,
             canGoBack: tab.view.webContents.canGoBack(),
@@ -362,7 +390,8 @@ class SkyIncludeBrowser {
             tab.loading = true;
             tab.hostingProvider = null;
             tab.hnsProfile = null;
-            this.mainWindow.webContents.send('loading-changed', { tabId, loading: true, hostingProvider: null, hnsProfile: null });
+            tab.favicon = null;
+            this.mainWindow.webContents.send('loading-changed', { tabId, loading: true, hostingProvider: null, hnsProfile: null, favicon: null });
 
             let finalUrl = inputUrl;
             let loadOptions = {};
@@ -439,7 +468,7 @@ class SkyIncludeBrowser {
             this.sendTabUpdated(tab);
 
             // Add to history
-            this.addToHistory(tab.url, this.getHistoryTitle(tab));
+            this.addToHistory(tab.url, this.getHistoryTitle(tab), tab.favicon);
 
         } catch (error) {
             delete tab.pendingLoadUrl;
@@ -494,7 +523,7 @@ class SkyIncludeBrowser {
                 return this.buildUnresolvedHNSNavigation(url, hostname);
             }
             
-            return { url };
+            return { url, hostingProvider: this.getHostingProviderForUrl(url) };
         } catch (error) {
             console.error('URL resolution error:', error);
             throw new Error(`Invalid URL: ${input}`);
@@ -550,7 +579,7 @@ class SkyIncludeBrowser {
             }
 
             if (!this.isHNSDomain(parsedUrl.hostname)) {
-                tab.hostingProvider = null;
+                tab.hostingProvider = this.getHostingProviderForUrl(parsedUrl.toString());
                 tab.hnsProfile = null;
             }
 
@@ -742,13 +771,27 @@ class SkyIncludeBrowser {
         return addresses.some(address => this.githubPagesAddresses.has(address)) ? 'github-pages' : null;
     }
 
-    addToHistory(url, title) {
+    getHostingProviderForUrl(inputUrl) {
+        try {
+            const parsedUrl = new URL(inputUrl);
+            const hostname = parsedUrl.hostname.toLowerCase();
+            if (hostname === 'github.io' || hostname.endsWith('.github.io') || hostname === 'pages.github.com') {
+                return 'github-pages';
+            }
+        } catch (error) {
+            return null;
+        }
+
+        return null;
+    }
+
+    addToHistory(url, title, favicon = null) {
         if (this.settingsManager.getSetting('saveHistory') === false) {
             return;
         }
 
         const historyManager = require('./history.js');
-        historyManager.addEntry(url, title);
+        historyManager.addEntry(url, title, Date.now(), favicon);
     }
 
     log(event, data = {}) {
@@ -1193,11 +1236,13 @@ class SkyIncludeBrowser {
     }
 
     buildHnsProfilePopoverDataUrl(profile) {
-        const rows = profile.entries.map(entry => `
-            <div class="row">
-                <div class="label">${this.escapeHtml(entry.label)}</div>
-                <div class="value">${this.escapeHtml(entry.value)}</div>
-            </div>
+        const entriesJson = JSON.stringify(profile.entries).replace(/</g, '\\u003c');
+        const rows = profile.entries.map((entry, index) => `
+            <button class="row" type="button" data-index="${index}" title="Copy ${this.escapeHtml(entry.label)}">
+                <span class="label">${this.escapeHtml(entry.label)}</span>
+                <span class="value">${this.escapeHtml(entry.value)}</span>
+                <span class="copy-state">Copy</span>
+            </button>
         `).join('');
 
         const html = `<!doctype html>
@@ -1209,25 +1254,70 @@ class SkyIncludeBrowser {
 body { margin: 0; background: #fff; color: #111827; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; overflow: hidden; }
 .card { border: 1px solid #d1d5db; border-radius: 8px; box-shadow: 0 12px 28px rgba(15, 23, 42, .22); height: 100vh; overflow: hidden; }
 .header { align-items: center; background: #f8fafc; border-bottom: 1px solid #e5e7eb; display: flex; justify-content: space-between; padding: 14px 16px; }
-.kicker { color: #15803d; font-size: 12px; font-weight: 800; text-transform: uppercase; }
-.domain { color: #111827; font-size: 19px; font-weight: 800; line-height: 1.2; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
-button { align-items: center; background: transparent; border: 0; border-radius: 4px; color: #6b7280; cursor: pointer; display: flex; font-size: 28px; height: 34px; justify-content: center; width: 34px; }
-button:hover { background: #eef2f7; color: #374151; }
+.domain { color: #111827; font-size: 20px; font-weight: 800; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
+.close { align-items: center; background: transparent; border: 0; border-radius: 4px; color: #6b7280; cursor: pointer; display: flex; font-size: 28px; height: 34px; justify-content: center; width: 34px; }
+.close:hover { background: #eef2f7; color: #374151; }
 .list { max-height: calc(100vh - 78px); overflow-y: auto; padding: 6px 0; }
-.row { border-bottom: 1px solid #f3f4f6; padding: 11px 16px; }
+.row { background: #fff; border: 0; border-bottom: 1px solid #f3f4f6; color: inherit; cursor: pointer; display: block; font: inherit; padding: 11px 16px; position: relative; text-align: left; width: 100%; }
+.row:hover { background: #f8fafc; }
 .row:last-child { border-bottom: 0; }
-.label { color: #64748b; font-size: 12px; font-weight: 800; margin-bottom: 6px; text-transform: uppercase; }
-.value { color: #111827; font-size: 15px; line-height: 1.35; overflow-wrap: anywhere; }
+.label { color: #64748b; display: block; font-size: 12px; font-weight: 800; margin-bottom: 6px; text-transform: uppercase; }
+.value { color: #111827; display: block; font-size: 15px; line-height: 1.35; overflow-wrap: anywhere; padding-right: 44px; user-select: text; }
+.copy-state { color: #15803d; font-size: 11px; font-weight: 800; opacity: 0; position: absolute; right: 16px; top: 14px; transition: opacity .15s ease; }
+.row:hover .copy-state, .row.copied .copy-state { opacity: 1; }
+.row.copied .copy-state { color: #166534; }
 </style>
 </head>
 <body>
 <div class="card">
     <div class="header">
-        <div><div class="kicker">hns.bio</div><div class="domain">${this.escapeHtml(profile.domain)}</div></div>
-        <button onclick="window.close()" title="Close">×</button>
+        <div class="domain">${this.escapeHtml(profile.domain)}</div>
+        <button class="close" onclick="window.close()" title="Close">×</button>
     </div>
     <div class="list">${rows}</div>
 </div>
+<script>
+const entries = ${entriesJson};
+function fallbackCopy(text) {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    const copied = document.execCommand('copy');
+    textarea.remove();
+    return copied;
+}
+async function copyValue(row, value) {
+    try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(value);
+        } else if (!fallbackCopy(value)) {
+            throw new Error('copy failed');
+        }
+        const state = row.querySelector('.copy-state');
+        row.classList.add('copied');
+        if (state) state.textContent = 'Copied';
+        setTimeout(() => {
+            row.classList.remove('copied');
+            if (state) state.textContent = 'Copy';
+        }, 1400);
+    } catch (error) {
+        const state = row.querySelector('.copy-state');
+        if (state) state.textContent = 'Select';
+    }
+}
+document.querySelectorAll('.row').forEach(row => {
+    row.addEventListener('click', () => {
+        const entry = entries[Number(row.dataset.index)];
+        if (entry && entry.value) {
+            copyValue(row, entry.value);
+        }
+    });
+});
+</script>
 </body>
 </html>`;
 
@@ -1536,6 +1626,104 @@ button:hover { background: #eef2f7; color: #374151; }
         });
     }
 
+    showPageContextMenu(webContents, params = {}) {
+        const menuItems = [];
+
+        if (params.linkURL) {
+            menuItems.push(
+                {
+                    label: 'Open Link in New Tab',
+                    click: () => {
+                        this.createNewTab(params.linkURL).catch(error => {
+                            this.log('context-open-link-error', { message: error.message });
+                        });
+                    }
+                },
+                {
+                    label: 'Copy Link',
+                    click: () => clipboard.writeText(params.linkURL)
+                },
+                { type: 'separator' }
+            );
+        }
+
+        if (params.hasSelection && !params.isEditable) {
+            menuItems.push({
+                label: 'Copy',
+                accelerator: 'CmdOrCtrl+C',
+                click: () => webContents.copy()
+            });
+        }
+
+        if (params.isEditable) {
+            if (menuItems.length) {
+                menuItems.push({ type: 'separator' });
+            }
+            menuItems.push(
+                {
+                    label: 'Cut',
+                    accelerator: 'CmdOrCtrl+X',
+                    click: () => webContents.cut()
+                },
+                {
+                    label: 'Copy',
+                    accelerator: 'CmdOrCtrl+C',
+                    click: () => webContents.copy()
+                },
+                {
+                    label: 'Paste',
+                    accelerator: 'CmdOrCtrl+V',
+                    click: () => webContents.paste()
+                },
+                { type: 'separator' },
+                {
+                    label: 'Select All',
+                    accelerator: 'CmdOrCtrl+A',
+                    click: () => webContents.selectAll()
+                }
+            );
+        } else {
+            if (menuItems.length) {
+                menuItems.push({ type: 'separator' });
+            }
+            menuItems.push(
+                {
+                    label: 'Back',
+                    enabled: webContents.canGoBack(),
+                    click: () => webContents.goBack()
+                },
+                {
+                    label: 'Forward',
+                    enabled: webContents.canGoForward(),
+                    click: () => webContents.goForward()
+                },
+                {
+                    label: 'Reload',
+                    accelerator: 'CmdOrCtrl+R',
+                    click: () => webContents.reload()
+                },
+                { type: 'separator' },
+                {
+                    label: 'Select All',
+                    accelerator: 'CmdOrCtrl+A',
+                    click: () => webContents.selectAll()
+                }
+            );
+        }
+
+        Menu.buildFromTemplate(menuItems).popup({ window: this.mainWindow });
+    }
+
+    showEditContextMenu() {
+        Menu.buildFromTemplate([
+            { role: 'cut', label: 'Cut' },
+            { role: 'copy', label: 'Copy' },
+            { role: 'paste', label: 'Paste' },
+            { type: 'separator' },
+            { role: 'selectAll', label: 'Select All' }
+        ]).popup({ window: this.mainWindow });
+    }
+
     setupIpcHandlers() {
         // Navigation handlers
         ipcMain.handle('navigate-to', async (event, payload) => {
@@ -1591,6 +1779,7 @@ button:hover { background: #eef2f7; color: #374151; }
                 url: tab.url,
                 title: tab.title,
                 loading: tab.loading,
+                favicon: tab.favicon,
                 hostingProvider: tab.hostingProvider,
                 hnsProfile: tab.hnsProfile,
                 active: tab.id === this.activeTabId
@@ -1657,6 +1846,11 @@ button:hover { background: #eef2f7; color: #374151; }
         ipcMain.handle('hide-hns-profile-popover', (event) => {
             this.requireTrustedIpcSender(event, 'hide-hns-profile-popover');
             this.closeHnsProfilePopover();
+        });
+
+        ipcMain.handle('show-edit-context-menu', (event) => {
+            this.requireTrustedIpcSender(event, 'show-edit-context-menu');
+            this.showEditContextMenu();
         });
 
         ipcMain.handle('set-browser-view-visible', (event, visible) => {

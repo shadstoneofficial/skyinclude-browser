@@ -41,7 +41,7 @@ class HistoryManager {
         }
     }
 
-    addEntry(url, title = '', timestamp = Date.now()) {
+    addEntry(url, title = '', timestamp = Date.now(), favicon = null) {
         // Skip internal URLs
         if (url.startsWith('skyinclude://') || url.startsWith('file://')) {
             return;
@@ -55,7 +55,8 @@ class HistoryManager {
             url: url,
             title: title || this.extractTitleFromUrl(url),
             timestamp: timestamp,
-            visitCount: 1
+            visitCount: 1,
+            favicon: typeof favicon === 'string' ? favicon : null
         };
 
         this.history.unshift(entry);

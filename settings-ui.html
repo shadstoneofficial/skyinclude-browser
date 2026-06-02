@@ -116,6 +116,9 @@
         }
         
         .form-select {
+            appearance: none;
+            -webkit-appearance: none;
+            -moz-appearance: none;
             background: white;
             background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewbox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='m6 8 4 4 4-4'/%3e%3c/svg%3e");
             background-position: right 0.5rem center;
@@ -372,7 +375,11 @@
 
         // Save settings
         document.getElementById('saveSettings').addEventListener('click', async () => {
+            const saveButton = document.getElementById('saveSettings');
+            const originalText = saveButton.textContent;
             try {
+                saveButton.disabled = true;
+                saveButton.textContent = 'Saving...';
                 const newSettings = {
                     hnsResolutionMode: document.getElementById('hnsResolutionMode').value,
                     hnsCustomResolver: document.getElementById('hnsCustomResolver').value.trim(),
@@ -389,10 +396,17 @@
                 };
 
                 await window.electronAPI.saveSettings(newSettings);
-                showMessage('Settings saved successfully!', 'success');
+                showMessage('Saved. Settings updated successfully.', 'success');
+                saveButton.textContent = 'Saved';
                 currentSettings = { ...currentSettings, ...newSettings };
             } catch (error) {
+                saveButton.textContent = originalText;
                 showMessage('Failed to save settings: ' + error.message, 'error');
+            } finally {
+                setTimeout(() => {
+                    saveButton.disabled = false;
+                    saveButton.textContent = originalText;
+                }, 1200);
             }
         });
 
@@ -443,6 +457,8 @@
             statusDiv.textContent = message;
             statusDiv.className = `status-message status-${type}`;
             statusDiv.style.display = 'block';
+            statusDiv.setAttribute('role', type === 'error' ? 'alert' : 'status');
+            statusDiv.scrollIntoView({ block: 'nearest' });
             
             setTimeout(() => {
                 statusDiv.style.display = 'none';

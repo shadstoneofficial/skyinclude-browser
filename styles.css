@@ -64,10 +64,20 @@ body {
 }
 
 .tab-favicon {
+    align-items: center;
+    display: flex;
+    justify-content: center;
     width: 16px;
     height: 16px;
     margin-right: 8px;
     flex-shrink: 0;
+}
+
+.tab-favicon-image {
+    display: block;
+    height: 16px;
+    object-fit: contain;
+    width: 16px;
 }
 
 .tab-title {
@@ -227,18 +237,18 @@ body {
     align-items: center;
     background-color: #e7f7ee;
     border: 1px solid #9ae6b4;
-    border-radius: 999px;
+    border-radius: 50%;
     color: #15803d;
     cursor: pointer;
     display: inline-flex;
     flex-shrink: 0;
-    font-size: 11px;
+    font-size: 14px;
     font-weight: 700;
     height: 24px;
     line-height: 1;
     margin-right: 8px;
-    padding: 0 8px;
-    text-transform: uppercase;
+    padding: 0;
+    width: 24px;
 }
 
 .hns-profile-button:hover {
@@ -557,6 +567,9 @@ body {
 }
 
 .history-favicon {
+    align-items: center;
+    display: flex;
+    justify-content: center;
     width: 16px;
     height: 16px;
     margin-right: 12px;

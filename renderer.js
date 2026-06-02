@@ -65,6 +65,15 @@ class SkyIncludeRenderer {
         this.addressBar.addEventListener('focus', () => {
             this.addressBar.select();
         });
+
+        this.addressBar.addEventListener('contextmenu', async (e) => {
+            e.preventDefault();
+            try {
+                await window.electronAPI.showEditContextMenu();
+            } catch (error) {
+                console.error('Failed to show address bar edit menu:', error);
+            }
+        });
         
         // Tab management
         this.newTabBtn.addEventListener('click', () => this.createNewTab());
@@ -361,6 +370,9 @@ class SkyIncludeRenderer {
             if (Object.prototype.hasOwnProperty.call(data, 'hnsProfile')) {
                 tab.hnsProfile = data.hnsProfile;
             }
+            if (Object.prototype.hasOwnProperty.call(data, 'favicon')) {
+                tab.favicon = data.favicon;
+            }
             this.updateTabLoadingUI(data.tabId, data.loading);
         }
     }
@@ -393,11 +405,6 @@ class SkyIncludeRenderer {
     }
 
     updateHostingIndicator(hostingProvider) {
-        if (hostingProvider === 'github-pages') {
-            this.hostingIndicator.classList.remove('hidden');
-            return;
-        }
-
         this.hostingIndicator.classList.add('hidden');
     }
 
@@ -432,9 +439,7 @@ class SkyIncludeRenderer {
         const favicon = document.createElement('div');
         favicon.className = 'tab-favicon';
 
-        const faviconIcon = document.createElement('i');
-        faviconIcon.className = this.getTabIconClass(tab);
-        favicon.appendChild(faviconIcon);
+        this.renderTabFavicon(favicon, tab);
 
         const title = document.createElement('div');
         title.className = 'tab-title';
@@ -474,11 +479,14 @@ class SkyIncludeRenderer {
     updateTabLoadingUI(tabId, loading) {
         const tabElement = this.tabsContainer.querySelector(`[data-tab-id="${tabId}"]`);
         if (tabElement) {
-            const favicon = tabElement.querySelector('.tab-favicon i');
+            const favicon = tabElement.querySelector('.tab-favicon');
             if (loading) {
-                favicon.className = 'fas fa-spinner fa-spin';
+                favicon.replaceChildren();
+                const spinner = document.createElement('i');
+                spinner.className = 'fas fa-spinner fa-spin';
+                favicon.appendChild(spinner);
             } else {
-                favicon.className = this.getTabIconClass(this.tabs.get(tabId));
+                this.renderTabFavicon(favicon, this.tabs.get(tabId));
             }
         }
     }
@@ -500,9 +508,9 @@ class SkyIncludeRenderer {
             }
 
             if (!tab.loading) {
-                const favicon = tabElement.querySelector('.tab-favicon i');
+                const favicon = tabElement.querySelector('.tab-favicon');
                 if (favicon) {
-                    favicon.className = this.getTabIconClass(tab);
+                    this.renderTabFavicon(favicon, tab);
                 }
             }
         }
@@ -563,6 +571,29 @@ class SkyIncludeRenderer {
         }
 
         return 'fas fa-globe';
+    }
+
+    renderTabFavicon(container, tab) {
+        container.replaceChildren();
+
+        if (!tab?.loading && tab?.favicon) {
+            const image = document.createElement('img');
+            image.className = 'tab-favicon-image';
+            image.alt = '';
+            image.src = tab.favicon;
+            image.addEventListener('error', () => {
+                container.replaceChildren();
+                const fallbackIcon = document.createElement('i');
+                fallbackIcon.className = this.getTabIconClass({ ...tab, favicon: null });
+                container.appendChild(fallbackIcon);
+            }, { once: true });
+            container.appendChild(image);
+            return;
+        }
+
+        const faviconIcon = document.createElement('i');
+        faviconIcon.className = this.getTabIconClass(tab);
+        container.appendChild(faviconIcon);
     }
 
     getTabTitle(tab) {
@@ -710,9 +741,23 @@ class SkyIncludeRenderer {
             const favicon = document.createElement('div');
             favicon.className = 'history-favicon';
 
-            const faviconIcon = document.createElement('i');
-            faviconIcon.className = 'fas fa-globe';
-            favicon.appendChild(faviconIcon);
+            if (entry.favicon) {
+                const faviconImage = document.createElement('img');
+                faviconImage.className = 'tab-favicon-image';
+                faviconImage.alt = '';
+                faviconImage.src = entry.favicon;
+                faviconImage.addEventListener('error', () => {
+                    favicon.replaceChildren();
+                    const fallbackIcon = document.createElement('i');
+                    fallbackIcon.className = 'fas fa-globe';
+                    favicon.appendChild(fallbackIcon);
+                }, { once: true });
+                favicon.appendChild(faviconImage);
+            } else {
+                const faviconIcon = document.createElement('i');
+                faviconIcon.className = 'fas fa-globe';
+                favicon.appendChild(faviconIcon);
+            }
 
             const content = document.createElement('div');
             content.className = 'history-content';
