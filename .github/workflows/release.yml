@@ -55,7 +55,7 @@ jobs:
 
       - name: Build signed and notarized macOS package
         if: matrix.platform.name == 'macOS'
-        timeout-minutes: 90
+        timeout-minutes: 180
         run: npm run ${{ matrix.platform.build-script }}
         env:
           CSC_LINK: ${{ secrets.CSC_LINK }}
