@@ -22,18 +22,24 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - name: macOS
+          - name: macOS x64
             runner: macos-latest
-            build-script: dist-mac-notarized
-            artifact-name: skyinclude-browser-macos
+            build_script: dist-mac-notarized
+            artifact_name: skyinclude-browser-macos-x64
+            mac_arches: x64
+          - name: macOS arm64
+            runner: macos-latest
+            build_script: dist-mac-notarized
+            artifact_name: skyinclude-browser-macos-arm64
+            mac_arches: arm64
           - name: Windows
             runner: windows-latest
-            build-script: dist-win
-            artifact-name: skyinclude-browser-windows
+            build_script: dist-win
+            artifact_name: skyinclude-browser-windows
           - name: Ubuntu
             runner: ubuntu-latest
-            build-script: dist-linux
-            artifact-name: skyinclude-browser-ubuntu
+            build_script: dist-linux
+            artifact_name: skyinclude-browser-ubuntu
 
     steps:
       - name: Check out repository
@@ -54,9 +60,9 @@ jobs:
         run: npm test
 
       - name: Build signed, notarized, and stapled macOS packages
-        if: matrix.platform.name == 'macOS'
+        if: startsWith(matrix.platform.name, 'macOS')
         timeout-minutes: 300
-        run: npm run ${{ matrix.platform.build-script }}
+        run: npm run ${{ matrix.platform.build_script }}
         env:
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
@@ -65,23 +71,28 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           NOTARY_MAX_ATTEMPTS: "240"
           NOTARY_SLEEP_SECONDS: "30"
+          MAC_ARCHES: ${{ matrix.platform.mac_arches }}
           DEBUG: electron-builder
 
       - name: Upload macOS notarization diagnostics
-        if: failure() && matrix.platform.name == 'macOS'
+        if: failure() && startsWith(matrix.platform.name, 'macOS')
         uses: actions/upload-artifact@v4
         with:
-          name: skyinclude-browser-macos-notarization-diagnostics
+          name: ${{ matrix.platform.artifact_name }}-notarization-diagnostics
           path: |
             dist/notary/*.json
           if-no-files-found: ignore
           retention-days: 14
 
       - name: Verify macOS code signature
-        if: matrix.platform.name == 'macOS'
+        if: startsWith(matrix.platform.name, 'macOS')
         shell: bash
         run: |
-          mapfile -t app_paths < <(find dist -maxdepth 3 -name "SkyInclude Browser.app" -type d | sort)
+          app_paths=()
+          while IFS= read -r app_path; do
+            app_paths+=("$app_path")
+          done < <(find dist -maxdepth 3 -name "SkyInclude Browser.app" -type d | sort)
+
           if [ "${#app_paths[@]}" -eq 0 ]; then
             echo "No macOS app bundle found in dist" >&2
             exit 1
@@ -93,8 +104,8 @@ jobs:
           done
 
       - name: Build platform package
-        if: matrix.platform.name != 'macOS'
-        run: npm run ${{ matrix.platform.build-script }}
+        if: ${{ !startsWith(matrix.platform.name, 'macOS') }}
+        run: npm run ${{ matrix.platform.build_script }}
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
 
@@ -124,7 +135,7 @@ jobs:
       - name: Upload release artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.platform.artifact-name }}
+          name: ${{ matrix.platform.artifact_name }}
           compression-level: 0
           path: |
             dist/*.dmg

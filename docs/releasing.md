@@ -21,11 +21,12 @@ Each platform job runs:
 6. Artifact upload
 7. GitHub artifact attestation generation from `dist/SHA256SUMS.txt`
 
-The macOS job uses `npm run dist-mac-notarized`. That script builds signed x64 and arm64 `.app` bundles, submits each app to Apple notarization, captures the submission ID, polls `notarytool info` with bounded retry/backoff, fetches `notarytool log` on failure, staples accepted tickets, verifies with `codesign` and `spctl`, and then creates DMGs with `hdiutil`.
+The macOS release workflow runs separate matrix jobs for x64 and arm64. Each macOS job uses `npm run dist-mac-notarized` with `MAC_ARCHES` set to one architecture. The script builds the signed `.app` bundle, submits it to Apple notarization, captures the submission ID, polls `notarytool info` with bounded retry/backoff, fetches `notarytool log` on failure, staples accepted tickets, verifies with `codesign` and `spctl`, and then creates the DMG with `hdiutil`.
 
 Expected artifacts:
 
-- macOS: `.dmg` files for Intel and Apple Silicon
+- macOS x64: `.dmg` file for Intel
+- macOS arm64: `.dmg` file for Apple Silicon
 - Windows: NSIS `.exe` installers
 - Ubuntu/Linux: `.AppImage` and `.deb` packages
 - `SHA256SUMS.txt` for each platform artifact set
@@ -57,7 +58,7 @@ Do not commit `.p12` files, app-specific passwords, or other signing material. A
 
 The macOS build config enables Hardened Runtime. Electron Builder signs the app bundle, while `scripts/build-notarized-macos.sh` handles Apple notarization, stapling, Gatekeeper verification, and DMG creation. The release workflow deliberately keeps certificate auto-discovery disabled for Windows and Linux jobs, but not for the macOS job.
 
-Apple notarization can take longer than ordinary packaging, so the macOS signing step has a longer timeout than the Windows and Linux package builds. If signing succeeds but notarization fails or times out, inspect `dist/notary/*.json` diagnostics from the macOS failure artifact before changing certificate secrets.
+Apple notarization can take longer than ordinary packaging, so each macOS signing step has a longer timeout than the Windows and Linux package builds. If signing succeeds but notarization fails or times out, inspect `dist/notary/*.json` diagnostics from that architecture's macOS failure artifact before changing certificate secrets.
 
 ## Manual Build Run
 
@@ -144,6 +145,8 @@ The `v0.1.7` release attempt proved Developer ID signing could succeed, but Appl
 The `v0.1.8` release attempt reached Developer ID signing but failed before notarization because macOS Bash treated the script's associative array lookup as an unbound variable under `set -u`. Keep release scripts portable to the Bash version available on GitHub's macOS runners, and prefer `case`/function lookup for architecture-specific paths.
 
 The same `v0.1.8` run built Windows packages but failed during artifact attestation before upload. The workflow now uploads packages before the attestation step and treats attestation failures as non-blocking until the Windows attestation behavior is understood.
+
+The `v0.1.9` and `v0.1.10` release attempts showed Apple could accept signed uploads but leave a notarization submission in `In Progress` until timeout. The workflow now splits macOS x64 and arm64 into separate jobs so one stuck Apple queue item cannot consume the other architecture's diagnostics or artifact path.
 
 Windows packages are also unsigned until a code-signing certificate is configured.
 

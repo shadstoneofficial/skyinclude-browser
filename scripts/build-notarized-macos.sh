@@ -7,7 +7,8 @@ PRODUCT_NAME="SkyInclude Browser"
 VERSION="$(node -p "require('./package.json').version")"
 NOTARY_MAX_ATTEMPTS="${NOTARY_MAX_ATTEMPTS:-240}"
 NOTARY_SLEEP_SECONDS="${NOTARY_SLEEP_SECONDS:-30}"
-MAC_ARCHES=(x64 arm64)
+MAC_ARCHES_INPUT="${MAC_ARCHES:-x64 arm64}"
+IFS=' ' read -r -a MAC_ARCHES <<< "${MAC_ARCHES_INPUT}"
 
 require_env() {
     local name="$1"
@@ -30,8 +31,17 @@ rm -rf dist
 mkdir -p dist/notary dist/dmg-stage
 
 echo "Building signed macOS app bundles for ${PRODUCT_NAME} ${VERSION}"
-npx electron-builder --mac dir --x64 --publish=never
-npx electron-builder --mac dir --arm64 --publish=never
+for arch in "${MAC_ARCHES[@]}"; do
+    case "${arch}" in
+        x64|arm64)
+            npx electron-builder --mac dir "--${arch}" --publish=never
+            ;;
+        *)
+            echo "Unsupported macOS arch: ${arch}" >&2
+            exit 1
+            ;;
+    esac
+done
 
 notary_json_value() {
     local file="$1"
