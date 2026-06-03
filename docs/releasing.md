@@ -18,8 +18,8 @@ Each platform job runs:
 3. `npm test`
 4. The platform build script from `package.json`
 5. SHA256 checksum generation
-6. GitHub artifact attestation generation from `dist/SHA256SUMS.txt`
-7. Artifact upload
+6. Artifact upload
+7. GitHub artifact attestation generation from `dist/SHA256SUMS.txt`
 
 The macOS job uses `npm run dist-mac-notarized`. That script builds signed x64 and arm64 `.app` bundles, submits each app to Apple notarization, captures the submission ID, polls `notarytool info` with bounded retry/backoff, fetches `notarytool log` on failure, staples accepted tickets, verifies with `codesign` and `spctl`, and then creates DMGs with `hdiutil`.
 
@@ -30,6 +30,8 @@ Expected artifacts:
 - Ubuntu/Linux: `.AppImage` and `.deb` packages
 - `SHA256SUMS.txt` for each platform artifact set
 - GitHub artifact attestations associated with the workflow run
+
+Artifact attestation is intentionally non-blocking while GitHub's attestation action is being validated across macOS, Windows, and Ubuntu runners. Treat a missing or failed attestation as a release-review warning, but do not let it hide otherwise built artifacts from the workflow run.
 
 ## macOS Developer ID Signing
 
@@ -138,6 +140,10 @@ gh release verify-asset "${RELEASE_TAG}" SkyInclude.Browser.Setup.0.1.1.exe -R s
 The macOS build signs, notarizes, staples, and verifies when the required Apple Developer ID secrets are present in GitHub Actions. If those secrets are missing or invalid, the macOS job should fail rather than publish unsigned public DMGs.
 
 The `v0.1.7` release attempt proved Developer ID signing could succeed, but Apple notarization hung/failed inside an opaque `notarytool submit --wait` path. Future releases should keep notarization explicit and retryable.
+
+The `v0.1.8` release attempt reached Developer ID signing but failed before notarization because macOS Bash treated the script's associative array lookup as an unbound variable under `set -u`. Keep release scripts portable to the Bash version available on GitHub's macOS runners, and prefer `case`/function lookup for architecture-specific paths.
+
+The same `v0.1.8` run built Windows packages but failed during artifact attestation before upload. The workflow now uploads packages before the attestation step and treats attestation failures as non-blocking until the Windows attestation behavior is understood.
 
 Windows packages are also unsigned until a code-signing certificate is configured.
 

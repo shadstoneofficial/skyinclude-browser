@@ -149,13 +149,23 @@ create_dmg() {
     hdiutil verify "${dmg_path}"
 }
 
-declare -A APP_PATHS=(
-    ["x64"]="dist/mac/${APP_BUNDLE_NAME}"
-    ["arm64"]="dist/mac-arm64/${APP_BUNDLE_NAME}"
-)
+app_path_for_arch() {
+    case "$1" in
+        x64)
+            printf '%s\n' "dist/mac/${APP_BUNDLE_NAME}"
+            ;;
+        arm64)
+            printf '%s\n' "dist/mac-arm64/${APP_BUNDLE_NAME}"
+            ;;
+        *)
+            echo "Unsupported macOS arch: $1" >&2
+            exit 1
+            ;;
+    esac
+}
 
 for arch in x64 arm64; do
-    app_path="${APP_PATHS[$arch]}"
+    app_path="$(app_path_for_arch "${arch}")"
     if [[ ! -d "${app_path}" ]]; then
         echo "Expected app bundle not found: ${app_path}" >&2
         exit 1

@@ -121,11 +121,6 @@ jobs:
           NODE
           cat SHA256SUMS.txt
 
-      - name: Attest release artifacts
-        uses: actions/attest@v4
-        with:
-          subject-checksums: dist/SHA256SUMS.txt
-
       - name: Upload release artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -141,3 +136,9 @@ jobs:
             dist/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 14
+
+      - name: Attest release artifacts
+        continue-on-error: true
+        uses: actions/attest@v4
+        with:
+          subject-checksums: dist/SHA256SUMS.txt
