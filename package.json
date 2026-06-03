@@ -1,6 +1,6 @@
 {
   "name": "skyinclude-browser",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Electron browser with native Handshake (HNS) domain resolution",
   "main": "main.js",
   "scripts": {
@@ -13,6 +13,7 @@
     "build-all": "electron-builder --mac --win --linux",
     "dist": "electron-builder --publish=never",
     "dist-mac": "electron-builder --mac --publish=never",
+    "dist-mac-notarized": "bash scripts/build-notarized-macos.sh",
     "dist-win": "electron-builder --win --publish=never",
     "dist-linux": "electron-builder --linux --publish=never",
     "pack": "electron-builder --dir",
@@ -66,7 +67,7 @@
       "icon": "assets/icon.icns",
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
-      "notarize": true
+      "notarize": false
     },
     "win": {
       "target": [

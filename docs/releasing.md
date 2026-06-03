@@ -21,6 +21,8 @@ Each platform job runs:
 6. GitHub artifact attestation generation from `dist/SHA256SUMS.txt`
 7. Artifact upload
 
+The macOS job uses `npm run dist-mac-notarized`. That script builds signed x64 and arm64 `.app` bundles, submits each app to Apple notarization, captures the submission ID, polls `notarytool info` with bounded retry/backoff, fetches `notarytool log` on failure, staples accepted tickets, verifies with `codesign` and `spctl`, and then creates DMGs with `hdiutil`.
+
 Expected artifacts:
 
 - macOS: `.dmg` files for Intel and Apple Silicon
@@ -31,7 +33,7 @@ Expected artifacts:
 
 ## macOS Developer ID Signing
 
-macOS release builds are intended to be signed with a Developer ID Application certificate and notarized by Apple. Electron Builder uses the repository secrets below during the macOS job:
+macOS release builds are intended to be signed with a Developer ID Application certificate and notarized by Apple. Electron Builder and the explicit notarization script use the repository secrets below during the macOS job:
 
 ```text
 CSC_LINK
@@ -51,9 +53,9 @@ Expected meanings:
 
 Do not commit `.p12` files, app-specific passwords, or other signing material. Add them only as GitHub Actions secrets.
 
-The macOS build config enables Hardened Runtime and Electron Builder notarization. The release workflow deliberately keeps certificate auto-discovery disabled for Windows and Linux jobs, but not for the macOS job.
+The macOS build config enables Hardened Runtime. Electron Builder signs the app bundle, while `scripts/build-notarized-macos.sh` handles Apple notarization, stapling, Gatekeeper verification, and DMG creation. The release workflow deliberately keeps certificate auto-discovery disabled for Windows and Linux jobs, but not for the macOS job.
 
-Apple notarization can take longer than ordinary packaging, so the macOS signing step has a longer timeout than the Windows and Linux package builds. If a run times out while waiting on `xcrun notarytool submit --wait`, the certificate import and code signing may still be correct; rerun after checking Apple's notarization service status.
+Apple notarization can take longer than ordinary packaging, so the macOS signing step has a longer timeout than the Windows and Linux package builds. If signing succeeds but notarization fails or times out, inspect `dist/notary/*.json` diagnostics from the macOS failure artifact before changing certificate secrets.
 
 ## Manual Build Run
 
@@ -133,7 +135,9 @@ gh release verify-asset "${RELEASE_TAG}" SkyInclude.Browser.Setup.0.1.1.exe -R s
 
 ## Current Signing Notes
 
-The macOS build signs and notarizes when the required Apple Developer ID secrets are present in GitHub Actions. If those secrets are missing or invalid, the macOS job should fail rather than publish unsigned public DMGs.
+The macOS build signs, notarizes, staples, and verifies when the required Apple Developer ID secrets are present in GitHub Actions. If those secrets are missing or invalid, the macOS job should fail rather than publish unsigned public DMGs.
+
+The `v0.1.7` release attempt proved Developer ID signing could succeed, but Apple notarization hung/failed inside an opaque `notarytool submit --wait` path. Future releases should keep notarization explicit and retryable.
 
 Windows packages are also unsigned until a code-signing certificate is configured.
 

@@ -24,7 +24,7 @@ jobs:
         platform:
           - name: macOS
             runner: macos-latest
-            build-script: dist-mac
+            build-script: dist-mac-notarized
             artifact-name: skyinclude-browser-macos
           - name: Windows
             runner: windows-latest
@@ -53,9 +53,9 @@ jobs:
       - name: Run syntax checks
         run: npm test
 
-      - name: Build signed and notarized macOS package
+      - name: Build signed, notarized, and stapled macOS packages
         if: matrix.platform.name == 'macOS'
-        timeout-minutes: 180
+        timeout-minutes: 140
         run: npm run ${{ matrix.platform.build-script }}
         env:
           CSC_LINK: ${{ secrets.CSC_LINK }}
@@ -63,7 +63,19 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          DEBUG: electron-builder,electron-notarize*
+          NOTARY_MAX_ATTEMPTS: "90"
+          NOTARY_SLEEP_SECONDS: "30"
+          DEBUG: electron-builder
+
+      - name: Upload macOS notarization diagnostics
+        if: failure() && matrix.platform.name == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: skyinclude-browser-macos-notarization-diagnostics
+          path: |
+            dist/notary/*.json
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Verify macOS code signature
         if: matrix.platform.name == 'macOS'
