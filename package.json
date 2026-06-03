@@ -1,6 +1,6 @@
 {
   "name": "skyinclude-browser",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Electron browser with native Handshake (HNS) domain resolution",
   "main": "main.js",
   "scripts": {

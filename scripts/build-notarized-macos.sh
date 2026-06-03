@@ -5,8 +5,9 @@ APP_NAME="SkyInclude Browser"
 APP_BUNDLE_NAME="${APP_NAME}.app"
 PRODUCT_NAME="SkyInclude Browser"
 VERSION="$(node -p "require('./package.json').version")"
-NOTARY_MAX_ATTEMPTS="${NOTARY_MAX_ATTEMPTS:-90}"
-NOTARY_SLEEP_SECONDS="${NOTARY_SLEEP_SECONDS:-60}"
+NOTARY_MAX_ATTEMPTS="${NOTARY_MAX_ATTEMPTS:-240}"
+NOTARY_SLEEP_SECONDS="${NOTARY_SLEEP_SECONDS:-30}"
+MAC_ARCHES=(x64 arm64)
 
 require_env() {
     local name="$1"
@@ -44,13 +45,11 @@ console.log(value);
 " "$file" "$key"
 }
 
-notarize_app() {
+submit_app_for_notarization() {
     local app_path="$1"
     local arch="$2"
     local zip_path="dist/notary/${PRODUCT_NAME}-${VERSION}-${arch}.zip"
     local submit_output="dist/notary/${arch}-submit.json"
-    local info_output="dist/notary/${arch}-info.json"
-    local log_output="dist/notary/${arch}-notary-log.json"
 
     echo "Verifying code signature before notarization: ${app_path}"
     codesign --verify --deep --strict --verbose=2 "${app_path}"
@@ -69,6 +68,15 @@ notarize_app() {
     local submission_id
     submission_id="$(notary_json_value "${submit_output}" id)"
     echo "Notary submission ID (${arch}): ${submission_id}"
+}
+
+poll_notarization() {
+    local arch="$1"
+    local submit_output="dist/notary/${arch}-submit.json"
+    local info_output="dist/notary/${arch}-info.json"
+    local log_output="dist/notary/${arch}-notary-log.json"
+    local submission_id
+    submission_id="$(notary_json_value "${submit_output}" id)"
 
     local status=""
     local attempt=1
@@ -118,7 +126,11 @@ notarize_app() {
             --output-format json | tee "${log_output}" || true
         exit 1
     fi
+}
 
+staple_and_verify_app() {
+    local app_path="$1"
+    local arch="$2"
     echo "Stapling notarization ticket for ${arch}: ${app_path}"
     xcrun stapler staple "${app_path}"
     xcrun stapler validate "${app_path}"
@@ -164,14 +176,23 @@ app_path_for_arch() {
     esac
 }
 
-for arch in x64 arm64; do
+for arch in "${MAC_ARCHES[@]}"; do
     app_path="$(app_path_for_arch "${arch}")"
     if [[ ! -d "${app_path}" ]]; then
         echo "Expected app bundle not found: ${app_path}" >&2
         exit 1
     fi
 
-    notarize_app "${app_path}" "${arch}"
+    submit_app_for_notarization "${app_path}" "${arch}"
+done
+
+for arch in "${MAC_ARCHES[@]}"; do
+    poll_notarization "${arch}"
+done
+
+for arch in "${MAC_ARCHES[@]}"; do
+    app_path="$(app_path_for_arch "${arch}")"
+    staple_and_verify_app "${app_path}" "${arch}"
     create_dmg "${app_path}" "${arch}"
 done
 

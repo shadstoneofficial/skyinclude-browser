@@ -55,7 +55,7 @@ jobs:
 
       - name: Build signed, notarized, and stapled macOS packages
         if: matrix.platform.name == 'macOS'
-        timeout-minutes: 140
+        timeout-minutes: 300
         run: npm run ${{ matrix.platform.build-script }}
         env:
           CSC_LINK: ${{ secrets.CSC_LINK }}
@@ -63,7 +63,7 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          NOTARY_MAX_ATTEMPTS: "90"
+          NOTARY_MAX_ATTEMPTS: "240"
           NOTARY_SLEEP_SECONDS: "30"
           DEBUG: electron-builder
 
