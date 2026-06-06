@@ -240,15 +240,19 @@ body {
     border-radius: 50%;
     color: #15803d;
     cursor: pointer;
-    display: inline-flex;
+    display: flex;
     flex-shrink: 0;
-    font-size: 14px;
-    font-weight: 700;
     height: 24px;
-    line-height: 1;
+    justify-content: center;
     margin-right: 8px;
     padding: 0;
     width: 24px;
+}
+
+.hns-profile-button i {
+    color: #15803d;
+    height: 14px;
+    width: 14px;
 }
 
 .hns-profile-button:hover {

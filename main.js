@@ -7,6 +7,7 @@ const http = require('http');
 // Initialize managers
 const SettingsManager = require('./settings.js');
 const { HNSResolver } = require('./resolver.js');
+const { inspectHnsHttpsCertificate } = require('./hns-tls.js');
 
 let activeBrowser = null;
 const LATEST_RELEASE_URL = 'https://github.com/shadstoneofficial/skyinclude-browser/releases/latest';
@@ -161,11 +162,15 @@ class SkyIncludeBrowser {
         });
 
         view.webContents.on('did-navigate', (event, navigationUrl) => {
-            this.updateTabUrlFromNavigation(tabId, navigationUrl);
+            this.updateTabUrlFromNavigation(tabId, navigationUrl).catch(error => {
+                this.log('navigation-url-update-error', { tabId, navigationUrl, message: error.message });
+            });
         });
 
         view.webContents.on('did-navigate-in-page', (event, navigationUrl) => {
-            this.updateTabUrlFromNavigation(tabId, navigationUrl);
+            this.updateTabUrlFromNavigation(tabId, navigationUrl).catch(error => {
+                this.log('navigation-url-update-error', { tabId, navigationUrl, message: error.message });
+            });
         });
 
         view.webContents.on('page-title-updated', (event, title) => {
@@ -496,9 +501,11 @@ class SkyIncludeBrowser {
         // Normalize input
         let url = this.normalizeGatewayUrl(input.trim());
         
-        // If no protocol, assume https
+        // If no protocol, HNS names default to the native HNS HTTP path for compatibility.
+        // Explicit https:// HNS URLs still use the DANE/TLSA status path.
         if (!url.startsWith('http://') && !url.startsWith('https://') && !url.startsWith('file://')) {
-            url = 'https://' + url;
+            const inputHost = url.split(/[/?#]/)[0];
+            url = `${this.isHNSDomain(inputHost) ? 'http' : 'https'}://${url}`;
         }
         url = this.normalizeGatewayUrl(url);
 
@@ -514,12 +521,15 @@ class SkyIncludeBrowser {
                 const hnsResult = await this.resolveHNS(hostname);
                 if (hnsResult) {
                     this.log('hns-resolution-success', this.getResolutionDiagnostics(hnsResult));
-                    return this.buildHNSNavigation(url, hnsResult);
+                    return await this.buildHNSNavigation(url, hnsResult);
                 }
                 
                 // Keep HNS traffic on the local proxy even when pre-resolution is transient.
                 console.log('HNS pre-resolution failed, deferring to local proxy');
                 this.mainWindow.webContents.send('hns-fallback', { domain: hostname });
+                if (parsedUrl.protocol === 'https:') {
+                    return await this.buildUnresolvedHNSStatusNavigation(url, hostname);
+                }
                 return this.buildUnresolvedHNSNavigation(url, hostname);
             }
             
@@ -548,7 +558,7 @@ class SkyIncludeBrowser {
         }
     }
 
-    updateTabUrlFromNavigation(tabId, navigationUrl) {
+    async updateTabUrlFromNavigation(tabId, navigationUrl) {
         const tab = this.tabs.get(tabId);
         if (!tab) return;
 
@@ -572,15 +582,30 @@ class SkyIncludeBrowser {
                 return;
             }
 
-            if (this.isIPAddress(parsedUrl.hostname)) {
+            if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
                 tab.hostingProvider = null;
                 tab.hnsProfile = null;
+                this.mainWindow.webContents.send('loading-changed', {
+                    tabId,
+                    loading: false,
+                    url: tab.url,
+                    canGoBack: tab.view.webContents.canGoBack(),
+                    canGoForward: tab.view.webContents.canGoForward(),
+                    hostingProvider: tab.hostingProvider,
+                    hnsProfile: tab.hnsProfile
+                });
+                this.sendTabUpdated(tab);
                 return;
             }
 
-            if (!this.isHNSDomain(parsedUrl.hostname)) {
+            if (this.isIPAddress(parsedUrl.hostname)) {
+                tab.hostingProvider = null;
+                tab.hnsProfile = null;
+            } else if (!this.isHNSDomain(parsedUrl.hostname)) {
                 tab.hostingProvider = this.getHostingProviderForUrl(parsedUrl.toString());
                 tab.hnsProfile = null;
+            } else {
+                await this.updateHNSMetadataForNavigation(tab, parsedUrl);
             }
 
             const previousHost = this.getHostnameForDisplayUrl(tab.url);
@@ -602,6 +627,26 @@ class SkyIncludeBrowser {
         } catch (error) {
             this.log('navigation-url-update-error', { tabId, navigationUrl, message: error.message });
         }
+    }
+
+    async updateHNSMetadataForNavigation(tab, parsedUrl) {
+        const hostname = this.normalizeGatewayHost(parsedUrl.hostname);
+        try {
+            const resolution = await this.resolveHNS(hostname);
+            if (resolution) {
+                tab.hostingProvider = this.getHostingProviderForResolution(resolution);
+                tab.hnsProfile = resolution.hnsProfile || null;
+                if (resolution.address) {
+                    this.hnsProxyHosts.set(hostname, resolution.address);
+                }
+                return;
+            }
+        } catch (error) {
+            this.log('hns-navigation-metadata-error', { host: hostname, message: error.message });
+        }
+
+        tab.hostingProvider = null;
+        tab.hnsProfile = null;
     }
 
     normalizeGatewayUrl(inputUrl) {
@@ -708,7 +753,7 @@ class SkyIncludeBrowser {
         };
     }
 
-    buildHNSNavigation(originalUrl, resolution) {
+    async buildHNSNavigation(originalUrl, resolution) {
         const parsedUrl = new URL(originalUrl);
         const hostingProvider = this.getHostingProviderForResolution(resolution);
 
@@ -721,6 +766,10 @@ class SkyIncludeBrowser {
         }
 
         if (resolution.address) {
+            if (parsedUrl.protocol === 'https:') {
+                return await this.buildHNSHttpsNavigation(originalUrl, resolution, hostingProvider);
+            }
+
             parsedUrl.protocol = 'http:';
 
             return {
@@ -742,6 +791,229 @@ class SkyIncludeBrowser {
         throw new Error(`No browsable HNS records found for ${resolution.domain}`);
     }
 
+    async buildHNSHttpsNavigation(originalUrl, resolution, hostingProvider = null) {
+        const parsedUrl = new URL(originalUrl);
+        const domain = resolution.domain || parsedUrl.hostname;
+        const fallbackUrl = new URL(originalUrl);
+        fallbackUrl.protocol = 'http:';
+
+        let records = [];
+        try {
+            records = await this.hnsResolver.resolveTLSARecords(domain);
+        } catch (error) {
+            this.log('hns-dane-resolver-failure', { domain, message: error.message });
+            return this.buildHNSHttpsStatusNavigation({
+                originalUrl,
+                fallbackUrl: fallbackUrl.toString(),
+                domain,
+                state: 'resolver_failure',
+                error: error.message,
+                hostingProvider,
+                hnsProfile: resolution.hnsProfile || null
+            });
+        }
+
+        if (!records.length) {
+            this.log('hns-dane-no-tlsa', { domain });
+            return this.buildHNSHttpsStatusNavigation({
+                originalUrl,
+                fallbackUrl: fallbackUrl.toString(),
+                domain,
+                state: 'no_tlsa',
+                hostingProvider,
+                hnsProfile: resolution.hnsProfile || null
+            });
+        }
+
+        const probe = await inspectHnsHttpsCertificate({
+            domain,
+            address: resolution.address,
+            port: parsedUrl.port ? Number(parsedUrl.port) : 443,
+            timeout: this.settingsManager.getSetting('hnsTimeout') || 15000
+        });
+
+        if (!probe.ok) {
+            this.log('hns-dane-connection-failure', { domain, state: probe.state, error: probe.error });
+            return this.buildHNSHttpsStatusNavigation({
+                originalUrl,
+                fallbackUrl: fallbackUrl.toString(),
+                domain,
+                state: probe.state || 'connection_failure',
+                error: probe.error,
+                hostingProvider,
+                hnsProfile: resolution.hnsProfile || null
+            });
+        }
+
+        const daneResult = await this.hnsResolver.verifyDANE(domain, probe.certificate, {
+            force: true,
+            records
+        });
+
+        this.log('hns-dane-result', {
+            domain,
+            state: daneResult.state,
+            supportedRecords: daneResult.supportedRecords,
+            unsupportedRecords: daneResult.unsupportedRecords
+        });
+
+        return this.buildHNSHttpsStatusNavigation({
+            originalUrl,
+            fallbackUrl: fallbackUrl.toString(),
+            domain,
+            state: daneResult.state,
+            error: daneResult.error,
+            hostingProvider,
+            hnsProfile: resolution.hnsProfile || null
+        });
+    }
+
+    buildHNSHttpsStatusNavigation({ originalUrl, fallbackUrl, domain, state, error = null, hostingProvider = null, hnsProfile = null }) {
+        const parsedUrl = new URL(originalUrl);
+        return {
+            url: this.buildHNSHttpsStatusDataUrl({ domain, originalUrl, fallbackUrl, state, error }),
+            displayUrl: `${domain}${parsedUrl.pathname}${parsedUrl.search}${parsedUrl.hash}`,
+            bypassCache: true,
+            hostingProvider,
+            hnsProfile
+        };
+    }
+
+    buildHNSHttpsStatusDataUrl({ domain, originalUrl, fallbackUrl, state, error = null }) {
+        const states = {
+            verified: {
+                title: 'HNS DANE Verified',
+                body: 'This server certificate matches the published HNS TLSA record. Rendering native HNS HTTPS still needs the scoped Chromium trust path before pages load directly.',
+                severity: 'success'
+            },
+            no_tlsa: {
+                title: 'No HNS TLSA Record Found',
+                body: 'This site can still be opened over native HNS HTTP, but it is not DANE verified.',
+                severity: 'warning'
+            },
+            tlsa_mismatch: {
+                title: 'HNS TLSA Mismatch',
+                body: 'This site published a TLSA record, but it does not match the HTTPS server certificate.',
+                severity: 'danger'
+            },
+            cert_expired: {
+                title: 'Certificate Expired',
+                body: 'This site published TLSA data, but the HTTPS certificate is expired.',
+                severity: 'danger'
+            },
+            cert_not_yet_valid: {
+                title: 'Certificate Not Yet Valid',
+                body: 'This site published TLSA data, but the HTTPS certificate is not valid yet.',
+                severity: 'danger'
+            },
+            unsupported_record: {
+                title: 'Unsupported TLSA Record',
+                body: 'This site published TLSA data using a format this version does not support yet.',
+                severity: 'danger'
+            },
+            resolver_failure: {
+                title: 'TLSA Resolver Failure',
+                body: 'SkyInclude could not check this site\'s HNS TLSA record.',
+                severity: 'danger'
+            },
+            connection_failure: {
+                title: 'HTTPS Connection Failed',
+                body: 'SkyInclude could not inspect this site\'s HTTPS certificate.',
+                severity: 'danger'
+            }
+        };
+        const details = states[state] || states.connection_failure;
+        const canFallback = state === 'no_tlsa';
+        const html = `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${this.escapeHtml(details.title)}</title>
+<style>
+body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f6f7f9; color: #1f2933; }
+main { max-width: 680px; margin: 12vh auto; padding: 0 24px; }
+.panel { border: 1px solid #d8dee6; background: #fff; border-radius: 8px; padding: 28px; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08); }
+.eyebrow { margin: 0 0 8px; font-size: 12px; font-weight: 700; letter-spacing: 0; text-transform: uppercase; color: #64748b; }
+h1 { margin: 0 0 12px; font-size: 26px; line-height: 1.2; }
+p { margin: 0 0 16px; line-height: 1.55; }
+.url { overflow-wrap: anywhere; color: #475569; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+.actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 24px; }
+a.button { display: inline-flex; align-items: center; justify-content: center; min-height: 38px; padding: 0 14px; border-radius: 6px; text-decoration: none; font-weight: 650; }
+a.primary { background: #116466; color: #fff; }
+a.secondary { border: 1px solid #cbd5e1; color: #243b53; background: #fff; }
+.danger { border-top: 4px solid #b42318; }
+.warning { border-top: 4px solid #b7791f; }
+.success { border-top: 4px solid #0f766e; }
+.error { margin-top: 16px; color: #7f1d1d; font-size: 13px; overflow-wrap: anywhere; }
+</style>
+</head>
+<body>
+<main>
+<section class="panel ${this.escapeHtml(details.severity)}">
+<p class="eyebrow">${this.escapeHtml(domain)}</p>
+<h1>${this.escapeHtml(details.title)}</h1>
+<p>${this.escapeHtml(details.body)}</p>
+<p class="url">${this.escapeHtml(originalUrl)}</p>
+${error ? `<p class="error">${this.escapeHtml(error)}</p>` : ''}
+<div class="actions">
+${canFallback ? `<a class="button primary" href="${this.escapeHtml(fallbackUrl)}">Open Native HNS HTTP</a>` : ''}
+<a class="button secondary" href="about:blank" onclick="if (history.length > 1) { history.back(); return false; }">Cancel</a>
+</div>
+</section>
+</main>
+</body>
+</html>`;
+
+        return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
+    }
+
+    buildHNSStatusDataUrl({ title, domain, body, originalUrl, error = null, severity = 'warning', actions = [] }) {
+        const actionLinks = actions.map(action => {
+            const classes = action.primary ? 'button primary' : 'button secondary';
+            return `<a class="${classes}" href="${this.escapeHtml(action.href)}">${this.escapeHtml(action.label)}</a>`;
+        }).join('');
+        const html = `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${this.escapeHtml(title)}</title>
+<style>
+body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f6f7f9; color: #1f2933; }
+main { max-width: 680px; margin: 12vh auto; padding: 0 24px; }
+.panel { border: 1px solid #d8dee6; background: #fff; border-radius: 8px; padding: 28px; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08); }
+.eyebrow { margin: 0 0 8px; font-size: 12px; font-weight: 700; letter-spacing: 0; text-transform: uppercase; color: #64748b; }
+h1 { margin: 0 0 12px; font-size: 26px; line-height: 1.2; }
+p { margin: 0 0 16px; line-height: 1.55; }
+.url { overflow-wrap: anywhere; color: #475569; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+.actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 24px; }
+a.button { display: inline-flex; align-items: center; justify-content: center; min-height: 38px; padding: 0 14px; border-radius: 6px; text-decoration: none; font-weight: 650; }
+a.primary { background: #116466; color: #fff; }
+a.secondary { border: 1px solid #cbd5e1; color: #243b53; background: #fff; }
+.danger { border-top: 4px solid #b42318; }
+.warning { border-top: 4px solid #b7791f; }
+.success { border-top: 4px solid #0f766e; }
+.error { margin-top: 16px; color: #7f1d1d; font-size: 13px; overflow-wrap: anywhere; }
+</style>
+</head>
+<body>
+<main>
+<section class="panel ${this.escapeHtml(severity)}">
+<p class="eyebrow">${this.escapeHtml(domain)}</p>
+<h1>${this.escapeHtml(title)}</h1>
+<p>${this.escapeHtml(body)}</p>
+<p class="url">${this.escapeHtml(originalUrl)}</p>
+${error ? `<p class="error">${this.escapeHtml(error)}</p>` : ''}
+<div class="actions">${actionLinks}</div>
+</section>
+</main>
+</body>
+</html>`;
+
+        return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
+    }
+
     buildUnresolvedHNSNavigation(originalUrl, hostname) {
         const parsedUrl = new URL(originalUrl);
         parsedUrl.protocol = 'http:';
@@ -755,6 +1027,47 @@ class SkyIncludeBrowser {
             hostingProvider: null,
             hnsProfile: null,
             bypassCache: true
+        };
+    }
+
+    async buildUnresolvedHNSStatusNavigation(originalUrl, hostname) {
+        const parsedUrl = new URL(originalUrl);
+        const serviceName = `_443._tcp.${hostname}`;
+        const settings = this.hnsResolver.getResolverSettings();
+        const timeout = this.settingsManager.getSetting('hnsTimeout') || settings.timeout || 15000;
+        const fallbackUrl = new URL(originalUrl);
+        fallbackUrl.protocol = 'http:';
+
+        const [serviceARecords, serviceTlsaRecords] = await Promise.all([
+            this.hnsResolver.queryDoh(settings.dohResolver, serviceName, 'A', timeout).catch(() => []),
+            this.hnsResolver.resolveTLSARecords(hostname).catch(() => [])
+        ]);
+        const body = serviceARecords.length && !serviceTlsaRecords.length
+            ? `A record found at ${serviceName}, but the website itself needs an A/AAAA record at ${hostname}. DANE also needs a TLSA record at ${serviceName}, not an A record there.`
+            : `No browsable HNS A/AAAA/CNAME record was found for ${hostname}.`;
+
+        this.log('hns-unresolved-status', {
+            host: hostname,
+            serviceARecords: serviceARecords.length,
+            serviceTlsaRecords: serviceTlsaRecords.length
+        });
+
+        return {
+            url: this.buildHNSStatusDataUrl({
+                title: 'HNS Site Not Resolved',
+                domain: hostname,
+                body,
+                originalUrl,
+                severity: 'danger',
+                actions: [
+                    { label: 'Try Native HNS HTTP', href: fallbackUrl.toString(), primary: true },
+                    { label: 'Cancel', href: 'about:blank' }
+                ]
+            }),
+            displayUrl: `${hostname}${parsedUrl.pathname}${parsedUrl.search}${parsedUrl.hash}`,
+            bypassCache: true,
+            hostingProvider: null,
+            hnsProfile: null
         };
     }
 

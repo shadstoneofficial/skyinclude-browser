@@ -17,8 +17,8 @@
     "dist-win": "electron-builder --win --publish=never",
     "dist-linux": "electron-builder --linux --publish=never",
     "pack": "electron-builder --dir",
-    "check": "node --check main.js && node --check preload.js && node --check renderer.js && node --check resolver.js && node --check settings.js && node --check history.js",
-    "test": "npm run check"
+    "check": "node --check main.js && node --check preload.js && node --check renderer.js && node --check resolver.js && node --check settings.js && node --check history.js && node --check hns-tls.js",
+    "test": "npm run check && node --test tests/*.test.js"
   },
   "keywords": [
     "browser",
@@ -45,6 +45,7 @@
       "preload.js",
       "renderer.js",
       "resolver.js",
+      "hns-tls.js",
       "history.js",
       "settings.js",
       "index.html",

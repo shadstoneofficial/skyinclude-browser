@@ -27,6 +27,7 @@ class SkyIncludeRenderer {
         this.hnsProfileList = document.getElementById('hns-profile-list');
         this.closeHnsProfileBtn = document.getElementById('close-hns-profile');
         this.clearCacheBtn = document.getElementById('clear-cache-btn');
+        this.homeBtn = document.getElementById('home-btn');
         this.updateBtn = document.getElementById('update-btn');
         this.appVersionBadge = document.getElementById('app-version-badge');
         this.menuVersionLabel = document.getElementById('menu-version-label');
@@ -80,6 +81,7 @@ class SkyIncludeRenderer {
 
         // Troubleshooting
         this.clearCacheBtn.addEventListener('click', () => this.clearCacheAndReload());
+        this.homeBtn.addEventListener('click', () => this.navigateToUrl('skyinclude://home'));
 
         this.hnsProfileBtn.addEventListener('click', (e) => {
             e.stopPropagation();

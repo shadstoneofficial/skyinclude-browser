@@ -1,13 +1,21 @@
 const https = require('https');
 const http = require('http');
 const dns = require('dns').promises;
+const crypto = require('crypto');
 const { URL } = require('url');
 
 const DNS_TYPES = {
     A: 1,
     CNAME: 5,
     TXT: 16,
-    AAAA: 28
+    AAAA: 28,
+    TLSA: 52
+};
+
+const SUPPORTED_TLSA = {
+    usage: 3,
+    selector: 1,
+    matchingType: 1
 };
 
 const HNS_BIO_PREFIXES = new Set([
@@ -132,7 +140,7 @@ class HNSResolver {
     }
 
     async resolveHeadlessWebRecords(domain) {
-        const attempts = 3;
+        const attempts = 5;
 
         for (let attempt = 1; attempt <= attempts; attempt += 1) {
             const result = await this.resolveWebRecordsOnly(domain);
@@ -141,7 +149,7 @@ class HNSResolver {
             }
 
             if (attempt < attempts) {
-                await new Promise(resolve => setTimeout(resolve, 200 * attempt));
+                await new Promise(resolve => setTimeout(resolve, 250 * attempt));
             }
         }
 
@@ -182,7 +190,7 @@ class HNSResolver {
         try {
             const data = await this.fetchJson(url.toString(), settings.timeout);
             const hnsProfile = await this.resolveHnsBioProfile(domain, settings);
-            const webResult = await this.resolveWebRecordsOnly(domain);
+            const webResult = await this.resolveHeadlessWebRecords(domain);
             if (webResult) {
                 return webResult;
             }
@@ -425,6 +433,11 @@ class HNSResolver {
                 results.push(...this.parseTxtRecord(rdata));
             } else if (typeName === 'CNAME' && type === DNS_TYPES.CNAME) {
                 results.push(this.readDnsName(buffer, rdataStart).name);
+            } else if (typeName === 'TLSA' && type === DNS_TYPES.TLSA) {
+                const record = this.parseTlsaRecord(rdata);
+                if (record) {
+                    results.push(record);
+                }
             }
 
             offset += rdlength;
@@ -493,6 +506,90 @@ class HNSResolver {
         return records;
     }
 
+    parseTlsaRecord(buffer) {
+        if (!Buffer.isBuffer(buffer) || buffer.length < 4) {
+            return null;
+        }
+
+        return {
+            usage: buffer[0],
+            selector: buffer[1],
+            matchingType: buffer[2],
+            certificateAssociationData: buffer.subarray(3).toString('hex').toLowerCase()
+        };
+    }
+
+    buildTlsaName(domain) {
+        return `_443._tcp.${this.normalizeDomain(domain)}`;
+    }
+
+    async resolveTLSARecords(domain, options = {}) {
+        const settings = this.getResolverSettings();
+        const tlsaName = this.buildTlsaName(domain);
+        const resolver = options.dohResolver || settings.dohResolver;
+        const timeout = options.timeout || settings.timeout;
+
+        return this.queryDoh(resolver, tlsaName, 'TLSA', timeout);
+    }
+
+    isSupportedTlsaRecord(record) {
+        return Boolean(record)
+            && record.usage === SUPPORTED_TLSA.usage
+            && record.selector === SUPPORTED_TLSA.selector
+            && record.matchingType === SUPPORTED_TLSA.matchingType
+            && typeof record.certificateAssociationData === 'string'
+            && /^[0-9a-f]+$/i.test(record.certificateAssociationData)
+            && record.certificateAssociationData.length === 64;
+    }
+
+    getCertificateDate(certificate, snakeKey, camelKey) {
+        return certificate?.[snakeKey] || certificate?.[camelKey] || null;
+    }
+
+    normalizeCertificateDate(value) {
+        if (!value) {
+            return null;
+        }
+
+        const timestamp = new Date(value).getTime();
+        return Number.isNaN(timestamp) ? null : timestamp;
+    }
+
+    getCertificateSpkiDer(certificate) {
+        if (!certificate) {
+            return null;
+        }
+
+        const directSpki = certificate.spkiDer || certificate.publicKeyDer || certificate.publicKeyRaw;
+        if (directSpki) {
+            return Buffer.isBuffer(directSpki) ? directSpki : Buffer.from(directSpki);
+        }
+
+        if (certificate.raw) {
+            try {
+                const x509 = new crypto.X509Certificate(certificate.raw);
+                return x509.publicKey.export({ type: 'spki', format: 'der' });
+            } catch (error) {
+                return null;
+            }
+        }
+
+        return null;
+    }
+
+    hashCertificateMaterial(certificate, selector, matchingType) {
+        if (selector !== SUPPORTED_TLSA.selector || matchingType !== SUPPORTED_TLSA.matchingType) {
+            return null;
+        }
+
+        const spkiDer = this.getCertificateSpkiDer(certificate);
+        if (!spkiDer) {
+            return null;
+        }
+
+        return crypto.createHash('sha256').update(spkiDer).digest('hex');
+    }
+
     formatIpv6(buffer) {
         const parts = [];
         for (let i = 0; i < 16; i += 2) {
@@ -554,25 +651,98 @@ class HNSResolver {
         return this.resolveViaDoh(this.normalizeDomain(domain));
     }
 
-    async verifyDANE(domain, certificate) {
-        if (!this.getResolverSettings().enableDANE) {
-            return true;
+    async verifyDANE(domain, certificate, options = {}) {
+        const cleanDomain = this.normalizeDomain(domain);
+        const tlsaName = this.buildTlsaName(cleanDomain);
+        const baseResult = {
+            state: 'disabled',
+            domain: cleanDomain,
+            tlsaName,
+            supportedRecords: 0,
+            unsupportedRecords: 0,
+            matchedRecord: null,
+            error: null
+        };
+
+        if (!options.force && !this.getResolverSettings().enableDANE) {
+            return baseResult;
+        }
+
+        let records = [];
+        try {
+            records = Array.isArray(options.records)
+                ? options.records
+                : await this.resolveTLSARecords(cleanDomain);
+        } catch (error) {
+            return {
+                ...baseResult,
+                state: 'resolver_failure',
+                error: error.message
+            };
+        }
+
+        if (!records.length) {
+            return {
+                ...baseResult,
+                state: 'no_tlsa'
+            };
         }
 
         if (!certificate) {
-            return false;
+            return {
+                ...baseResult,
+                state: 'connection_failure',
+                error: 'No certificate was provided for DANE verification'
+            };
+        }
+
+        const supported = records.filter(record => this.isSupportedTlsaRecord(record));
+        const unsupported = records.length - supported.length;
+        const withCounts = {
+            ...baseResult,
+            supportedRecords: supported.length,
+            unsupportedRecords: unsupported
+        };
+
+        if (!supported.length) {
+            return {
+                ...withCounts,
+                state: 'unsupported_record'
+            };
         }
 
         const now = Date.now();
-        if (certificate.valid_from && new Date(certificate.valid_from) > now) {
-            return false;
+        const validFrom = this.normalizeCertificateDate(this.getCertificateDate(certificate, 'valid_from', 'validFrom'));
+        if (validFrom && validFrom > now) {
+            return {
+                ...withCounts,
+                state: 'cert_not_yet_valid'
+            };
         }
 
-        if (certificate.valid_to && new Date(certificate.valid_to) < now) {
-            return false;
+        const validTo = this.normalizeCertificateDate(this.getCertificateDate(certificate, 'valid_to', 'validTo'));
+        if (validTo && validTo < now) {
+            return {
+                ...withCounts,
+                state: 'cert_expired'
+            };
         }
 
-        return true;
+        for (const record of supported) {
+            const hash = this.hashCertificateMaterial(certificate, record.selector, record.matchingType);
+            if (hash && hash === record.certificateAssociationData.toLowerCase()) {
+                return {
+                    ...withCounts,
+                    state: 'verified',
+                    matchedRecord: record
+                };
+            }
+        }
+
+        return {
+            ...withCounts,
+            state: 'tlsa_mismatch'
+        };
     }
 
     async checkTraditionalDNS(domain) {

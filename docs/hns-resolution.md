@@ -42,6 +42,18 @@ Names ending in `.agent` and `.chatbot` can work as both websites and agent iden
 
 This lets domains such as `mike.agent`, `pourspout.agent`, and `saltrimmer.agent` open their hosted websites by default while keeping their agent manifests discoverable.
 
+## HNS HTTPS And DANE/TLSA
+
+Native HNS HTTPS is a separate trust path from normal WebPKI HTTPS. A compatible HNS browser needs to resolve the HNS name, inspect the HTTPS server certificate using the HNS hostname as SNI, and verify the certificate against TLSA records such as:
+
+```text
+_443._tcp.<name> TLSA 3 1 1 <sha256-of-public-key>
+```
+
+SkyInclude Browser keeps normal WebPKI validation for ICANN domains separate from HNS DANE/TLSA work.
+
+Many early HNS websites do not publish TLSA records. Missing TLSA records do not break ordinary HNS browsing: `http://<name>` can still load through the local HNS HTTP proxy. If a user asks for `https://<name>` and no TLSA record exists, the browser describes that as not DANE verified and offers an explicit compatibility fallback to native HNS HTTP. If a TLSA record exists but does not match the server certificate, the browser fails closed instead of silently downgrading.
+
 ## No-Install Fallback
 
 For users who only need to check whether an HNS site loads in a normal browser, use the public gateway form:
