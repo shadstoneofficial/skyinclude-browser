@@ -18,6 +18,16 @@ require_env() {
     fi
 }
 
+developer_id_identity() {
+    if [[ -n "${DMG_SIGN_IDENTITY:-}" ]]; then
+        printf '%s\n' "${DMG_SIGN_IDENTITY}"
+        return
+    fi
+
+    security find-identity -v -p codesigning \
+        | awk -F '"' '/Developer ID Application/ { print $2; exit }'
+}
+
 if [[ "$(uname -s)" != "Darwin" ]]; then
     echo "macOS notarization must run on macOS." >&2
     exit 1
@@ -55,21 +65,22 @@ console.log(value);
 " "$file" "$key"
 }
 
-submit_app_for_notarization() {
-    local app_path="$1"
-    local arch="$2"
-    local zip_path="dist/notary/${PRODUCT_NAME}-${VERSION}-${arch}.zip"
-    local submit_output="dist/notary/${arch}-submit.json"
+submit_artifact_for_notarization() {
+    local artifact_path="$1"
+    local label="$2"
+    local submit_path="$3"
+    local submit_output="dist/notary/${label}-submit.json"
 
-    echo "Verifying code signature before notarization: ${app_path}"
-    codesign --verify --deep --strict --verbose=2 "${app_path}"
+    if [[ -n "${submit_path}" ]]; then
+        echo "Creating notarization zip: ${submit_path}"
+        rm -f "${submit_path}"
+        ditto -c -k --sequesterRsrc --keepParent "${artifact_path}" "${submit_path}"
+    else
+        submit_path="${artifact_path}"
+    fi
 
-    echo "Creating notarization zip: ${zip_path}"
-    rm -f "${zip_path}"
-    ditto -c -k --sequesterRsrc --keepParent "${app_path}" "${zip_path}"
-
-    echo "Submitting ${arch} app for notarization"
-    xcrun notarytool submit "${zip_path}" \
+    echo "Submitting ${label} for notarization"
+    xcrun notarytool submit "${submit_path}" \
         --apple-id "${APPLE_ID}" \
         --password "${APPLE_APP_SPECIFIC_PASSWORD}" \
         --team-id "${APPLE_TEAM_ID}" \
@@ -77,21 +88,31 @@ submit_app_for_notarization() {
 
     local submission_id
     submission_id="$(notary_json_value "${submit_output}" id)"
-    echo "Notary submission ID (${arch}): ${submission_id}"
+    echo "Notary submission ID (${label}): ${submission_id}"
+}
+
+submit_app_for_notarization() {
+    local app_path="$1"
+    local arch="$2"
+    local zip_path="dist/notary/${PRODUCT_NAME}-${VERSION}-${arch}.zip"
+
+    echo "Verifying code signature before app notarization: ${app_path}"
+    codesign --verify --deep --strict --verbose=2 "${app_path}"
+    submit_artifact_for_notarization "${app_path}" "${arch}" "${zip_path}"
 }
 
 poll_notarization() {
-    local arch="$1"
-    local submit_output="dist/notary/${arch}-submit.json"
-    local info_output="dist/notary/${arch}-info.json"
-    local log_output="dist/notary/${arch}-notary-log.json"
+    local label="$1"
+    local submit_output="dist/notary/${label}-submit.json"
+    local info_output="dist/notary/${label}-info.json"
+    local log_output="dist/notary/${label}-notary-log.json"
     local submission_id
     submission_id="$(notary_json_value "${submit_output}" id)"
 
     local status=""
     local attempt=1
     while [[ "${attempt}" -le "${NOTARY_MAX_ATTEMPTS}" ]]; do
-        echo "Polling notarization status for ${arch}, attempt ${attempt}/${NOTARY_MAX_ATTEMPTS}"
+        echo "Polling notarization status for ${label}, attempt ${attempt}/${NOTARY_MAX_ATTEMPTS}"
 
         if xcrun notarytool info "${submission_id}" \
             --apple-id "${APPLE_ID}" \
@@ -107,11 +128,11 @@ poll_notarization() {
 
         case "${status}" in
             Accepted)
-                echo "Notarization accepted for ${arch}"
+                echo "Notarization accepted for ${label}"
                 break
                 ;;
             Invalid|Rejected)
-                echo "Notarization ${status} for ${arch}; fetching notary log" >&2
+                echo "Notarization ${status} for ${label}; fetching notary log" >&2
                 xcrun notarytool log "${submission_id}" \
                     --apple-id "${APPLE_ID}" \
                     --password "${APPLE_APP_SPECIFIC_PASSWORD}" \
@@ -128,7 +149,7 @@ poll_notarization() {
     done
 
     if [[ "${status}" != "Accepted" ]]; then
-        echo "Timed out waiting for notarization acceptance for ${arch}; fetching latest notary log if available" >&2
+        echo "Timed out waiting for notarization acceptance for ${label}; fetching latest notary log if available" >&2
         xcrun notarytool log "${submission_id}" \
             --apple-id "${APPLE_ID}" \
             --password "${APPLE_APP_SPECIFIC_PASSWORD}" \
@@ -168,7 +189,25 @@ create_dmg() {
         -format UDZO \
         "${dmg_path}"
 
+    local identity
+    identity="$(developer_id_identity)"
+    if [[ -z "${identity}" ]]; then
+        echo "No Developer ID Application identity found for DMG signing." >&2
+        exit 1
+    fi
+
+    echo "Signing DMG with ${identity}: ${dmg_path}"
+    codesign --force --sign "${identity}" "${dmg_path}"
+    codesign --verify --verbose=2 "${dmg_path}"
     hdiutil verify "${dmg_path}"
+
+    submit_artifact_for_notarization "${dmg_path}" "${arch}-dmg" ""
+    poll_notarization "${arch}-dmg"
+
+    echo "Stapling notarization ticket for ${arch} DMG: ${dmg_path}"
+    xcrun stapler staple "${dmg_path}"
+    xcrun stapler validate "${dmg_path}"
+    spctl --assess --type open --context context:primary-signature --verbose "${dmg_path}"
 }
 
 app_path_for_arch() {
