@@ -12,7 +12,7 @@ class SettingsManager {
                 'https://hnsdoh.com/dns-query'
             ],
             hnsCustomResolver: '',
-            hnsTimeout: 15000,
+            hnsTimeout: 4000,
             hnsDANE: false,
             hnsFallbackToDNS: true,
             

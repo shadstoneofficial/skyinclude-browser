@@ -18,6 +18,11 @@ const SUPPORTED_TLSA = {
     matchingType: 1
 };
 
+const FALLBACK_DOH_RESOLVERS = [
+    'https://hnsdoh.com/dns-query',
+    'https://query.hdns.io/dns-query'
+];
+
 const HNS_BIO_PREFIXES = new Set([
     'pfp', 'bgcolor', 'bg', 'mail', 'tel', 'tb', 'sx', 'matrix', 'sn',
     'wa', 'tg', 'link', 'ens', 'onion', 'ipfs', 'pk', 'x', 'nostr',
@@ -69,12 +74,14 @@ class HNSResolver {
             resolutionMode: 'doh',
             dohResolver: 'https://hnsdoh.com/dns-query',
             headlessLookupBase: 'https://headlessdomains.com/api/v1/lookup/',
-            timeout: 10000,
+            timeout: 4000,
             enableDANE: false
         };
 
         this.cache = new Map();
         this.cacheTimeout = 300000;
+        this.tlsaCache = new Map();
+        this.tlsaCacheTimeout = 300000;
     }
 
     getResolverSettings() {
@@ -84,15 +91,67 @@ class HNSResolver {
 
         const resolvers = this.settingsManager.getSetting('hnsResolvers') || [];
         const customResolver = this.settingsManager.getSetting('hnsCustomResolver');
-        const dohResolver = customResolver || resolvers.find(resolver => resolver.includes('/dns-query'));
+        const dohResolver = customResolver || resolvers.find(resolver => String(resolver || '').includes('/dns-query'));
+
+        const configuredTimeout = Number(this.settingsManager.getSetting('hnsTimeout') || this.settings.timeout);
+        const timeout = Number.isFinite(configuredTimeout) && configuredTimeout > 0
+            ? Math.min(configuredTimeout, this.settings.timeout)
+            : this.settings.timeout;
 
         return {
             resolutionMode: this.settingsManager.getSetting('hnsResolutionMode') || 'doh',
             dohResolver: dohResolver || this.settings.dohResolver,
             headlessLookupBase: this.settings.headlessLookupBase,
-            timeout: this.settingsManager.getSetting('hnsTimeout') || this.settings.timeout,
+            timeout,
             enableDANE: this.settingsManager.getSetting('hnsDANE') === true
         };
+    }
+
+    normalizeDohResolver(resolverUrl) {
+        const value = String(resolverUrl || '').trim();
+        if (!value) {
+            return null;
+        }
+
+        const withScheme = value.startsWith('http://') || value.startsWith('https://')
+            ? value
+            : `https://${value}`;
+
+        try {
+            const url = new URL(withScheme);
+            if (!url.pathname || url.pathname === '/') {
+                url.pathname = '/dns-query';
+            }
+            return url.toString();
+        } catch (error) {
+            return null;
+        }
+    }
+
+    getDohResolverCandidates(options = {}) {
+        const settings = this.getResolverSettings();
+        const resolvers = this.settingsManager?.getSetting('hnsResolvers') || [];
+        const customResolver = this.settingsManager?.getSetting('hnsCustomResolver');
+        const candidates = [
+            options.dohResolver,
+            customResolver,
+            settings.dohResolver,
+            ...resolvers,
+            ...FALLBACK_DOH_RESOLVERS
+        ];
+        const seen = new Set();
+
+        return candidates
+            .map(resolver => this.normalizeDohResolver(resolver))
+            .filter(Boolean)
+            .filter(resolver => {
+                const key = resolver.toLowerCase();
+                if (seen.has(key)) {
+                    return false;
+                }
+                seen.add(key);
+                return true;
+            });
     }
 
     async resolveHNSDomain(domain) {
@@ -352,9 +411,10 @@ class HNSResolver {
     }
 
     async queryDoh(resolverUrl, domain, typeName, timeout) {
-        const resolver = resolverUrl.startsWith('http')
-            ? resolverUrl
-            : `https://${resolverUrl.replace(/\/$/, '')}/dns-query`;
+        const resolver = this.normalizeDohResolver(resolverUrl);
+        if (!resolver) {
+            throw new Error(`Invalid DoH resolver: ${resolverUrl}`);
+        }
         const query = this.buildDnsQuery(domain, DNS_TYPES[typeName]);
         const url = new URL(resolver);
         url.searchParams.set('dns', query.toString('base64url'));
@@ -526,10 +586,32 @@ class HNSResolver {
     async resolveTLSARecords(domain, options = {}) {
         const settings = this.getResolverSettings();
         const tlsaName = this.buildTlsaName(domain);
-        const resolver = options.dohResolver || settings.dohResolver;
+        const resolvers = this.getDohResolverCandidates(options);
         const timeout = options.timeout || settings.timeout;
+        const lookupErrors = [];
 
-        return this.queryDoh(resolver, tlsaName, 'TLSA', timeout);
+        for (const resolver of resolvers) {
+            const cacheKey = `${resolver}|${tlsaName}`.toLowerCase();
+            const cached = this.tlsaCache.get(cacheKey);
+
+            if (!options.force && cached && Date.now() - cached.timestamp < this.tlsaCacheTimeout) {
+                return cached.records;
+            }
+
+            try {
+                const records = await this.queryDoh(resolver, tlsaName, 'TLSA', timeout);
+                this.tlsaCache.set(cacheKey, {
+                    records,
+                    timestamp: Date.now()
+                });
+
+                return records;
+            } catch (error) {
+                lookupErrors.push(`${resolver}: ${error.message}`);
+            }
+        }
+
+        throw new Error(lookupErrors.join('; ') || `No DoH resolver available for ${tlsaName}`);
     }
 
     isSupportedTlsaRecord(record) {
@@ -761,11 +843,13 @@ class HNSResolver {
 
     clearCache() {
         this.cache.clear();
+        this.tlsaCache.clear();
     }
 
     getCacheStats() {
         return {
-            size: this.cache.size
+            size: this.cache.size,
+            tlsaSize: this.tlsaCache.size
         };
     }
 }

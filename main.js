@@ -29,6 +29,10 @@ class SkyIncludeBrowser {
         this.statusBarVisible = false;
         this.daneVerifiedCertificates = new Map();
         this.daneTrustTtlMs = 5 * 60 * 1000;
+        this.hnsHttpsAvailabilityCache = new Map();
+        this.hnsHttpsAvailabilityTtlMs = 5 * 60 * 1000;
+        this.daneLookupTimeoutMs = 2500;
+        this.daneProbeTimeoutMs = 4000;
         this.certificateVerifierConfiguredSessions = new WeakSet();
         this.securityPopover = null;
         this.hnsProfilePopover = null;
@@ -512,20 +516,51 @@ class SkyIncludeBrowser {
         return trust;
     }
 
+    getActiveDaneTrust(domain) {
+        const normalizedDomain = this.normalizeGatewayHost(String(domain || '').toLowerCase());
+        const trust = this.daneVerifiedCertificates.get(normalizedDomain);
+        if (!trust) {
+            return null;
+        }
+
+        if (trust.expiresAt <= Date.now()) {
+            this.daneVerifiedCertificates.delete(normalizedDomain);
+            return null;
+        }
+
+        return trust;
+    }
+
     isDaneVerifiedCertificateAllowed(hostname, certificate) {
         const normalizedHostname = this.normalizeGatewayHost(String(hostname || '').toLowerCase());
         if (!normalizedHostname || !this.isHNSDomain(normalizedHostname)) {
             return false;
         }
 
-        const trust = this.daneVerifiedCertificates.get(normalizedHostname);
-        if (!trust || trust.expiresAt <= Date.now()) {
-            this.daneVerifiedCertificates.delete(normalizedHostname);
+        const trust = this.getActiveDaneTrust(normalizedHostname);
+        if (!trust) {
             return false;
         }
 
         const fingerprints = this.getCertificateFingerprints(certificate);
         return fingerprints.some(fingerprint => trust.fingerprints.includes(fingerprint));
+    }
+
+    getBoundedDaneTimeout(defaultMs) {
+        const configuredTimeout = Number(this.settingsManager.getSetting('hnsTimeout') || defaultMs);
+        if (!Number.isFinite(configuredTimeout) || configuredTimeout <= 0) {
+            return defaultMs;
+        }
+
+        return Math.min(configuredTimeout, defaultMs);
+    }
+
+    getDaneLookupTimeout() {
+        return this.getBoundedDaneTimeout(this.daneLookupTimeoutMs);
+    }
+
+    getDaneProbeTimeout() {
+        return this.getBoundedDaneTimeout(this.daneProbeTimeoutMs);
     }
 
     sendTabUpdated(tab) {
@@ -959,24 +994,35 @@ class SkyIncludeBrowser {
     }
 
     async resolveHNS(domain) {
-        const attempts = 3;
+        const attempts = 1;
+        const startedAt = Date.now();
 
         for (let attempt = 1; attempt <= attempts; attempt += 1) {
+            const attemptStartedAt = Date.now();
             try {
                 const result = await this.hnsResolver.resolveHNSDomain(domain);
                 if (result) {
-                    if (attempt > 1) {
-                        this.log('hns-resolution-retry-success', {
-                            attempt,
-                            ...this.getResolutionDiagnostics(result)
-                        });
-                    }
+                    this.log('hns-resolution-complete', {
+                        attempt,
+                        elapsedMs: Date.now() - startedAt,
+                        attemptElapsedMs: Date.now() - attemptStartedAt,
+                        ...this.getResolutionDiagnostics(result)
+                    });
                     return result;
                 }
 
-                this.log('hns-resolution-empty', { attempt });
+                this.log('hns-resolution-empty', {
+                    attempt,
+                    elapsedMs: Date.now() - startedAt,
+                    attemptElapsedMs: Date.now() - attemptStartedAt
+                });
             } catch (error) {
-                this.log('hns-resolution-error', { attempt, message: error.message });
+                this.log('hns-resolution-error', {
+                    attempt,
+                    message: error.message,
+                    elapsedMs: Date.now() - startedAt,
+                    attemptElapsedMs: Date.now() - attemptStartedAt
+                });
                 console.error('HNS resolution failed:', error);
             }
 
@@ -1036,16 +1082,45 @@ class SkyIncludeBrowser {
             return;
         }
 
+        const cacheKey = `${check.domain}|${check.address}|${check.port || 443}`.toLowerCase();
+        const cached = this.hnsHttpsAvailabilityCache.get(cacheKey);
+        if (cached && Date.now() - cached.timestamp < this.hnsHttpsAvailabilityTtlMs) {
+            this.log('hns-https-availability-cache-hit', {
+                domain: check.domain,
+                state: cached.state,
+                elapsedMs: 0
+            });
+            if (cached.state === 'verified') {
+                this.sendStatusMessage(`DANE-verified HTTPS is available for ${check.domain}.`, 'success', {
+                    label: 'Open HTTPS',
+                    url: check.upgradeUrl
+                });
+            }
+            return;
+        }
+
+        const startedAt = Date.now();
+
         let records = [];
         try {
-            records = await this.hnsResolver.resolveTLSARecords(check.domain);
+            records = await this.hnsResolver.resolveTLSARecords(check.domain, {
+                timeout: this.getDaneLookupTimeout()
+            });
         } catch (error) {
-            this.log('hns-https-availability-tlsa-error', { domain: check.domain, message: error.message });
+            this.log('hns-https-availability-tlsa-error', {
+                domain: check.domain,
+                message: error.message,
+                elapsedMs: Date.now() - startedAt
+            });
             return;
         }
 
         if (!records.length) {
-            this.log('hns-https-availability-none', { domain: check.domain });
+            this.hnsHttpsAvailabilityCache.set(cacheKey, { state: 'no_tlsa', timestamp: Date.now() });
+            this.log('hns-https-availability-none', {
+                domain: check.domain,
+                elapsedMs: Date.now() - startedAt
+            });
             return;
         }
 
@@ -1053,14 +1128,15 @@ class SkyIncludeBrowser {
             domain: check.domain,
             address: check.address,
             port: check.port || 443,
-            timeout: this.settingsManager.getSetting('hnsTimeout') || 15000
+            timeout: this.getDaneProbeTimeout()
         });
 
         if (!probe.ok) {
             this.log('hns-https-availability-probe-failed', {
                 domain: check.domain,
                 state: probe.state,
-                error: probe.error
+                error: probe.error,
+                elapsedMs: Date.now() - startedAt
             });
             return;
         }
@@ -1074,12 +1150,22 @@ class SkyIncludeBrowser {
             domain: check.domain,
             state: daneResult.state,
             supportedRecords: daneResult.supportedRecords,
-            unsupportedRecords: daneResult.unsupportedRecords
+            unsupportedRecords: daneResult.unsupportedRecords,
+            elapsedMs: Date.now() - startedAt
         });
 
         if (daneResult.state !== 'verified') {
+            this.hnsHttpsAvailabilityCache.set(cacheKey, {
+                state: daneResult.state,
+                timestamp: Date.now()
+            });
             return;
         }
+
+        this.hnsHttpsAvailabilityCache.set(cacheKey, {
+            state: 'verified',
+            timestamp: Date.now()
+        });
 
         if (this.tabs.get(tabId) !== tab || tab.id !== this.activeTabId || tab.loading) {
             return;
@@ -1141,12 +1227,36 @@ class SkyIncludeBrowser {
         const domain = resolution.domain || parsedUrl.hostname;
         const fallbackUrl = new URL(originalUrl);
         fallbackUrl.protocol = 'http:';
+        const startedAt = Date.now();
+
+        if (this.getActiveDaneTrust(domain)) {
+            this.log('hns-dane-trust-cache-hit', {
+                domain,
+                elapsedMs: Date.now() - startedAt
+            });
+            return {
+                url: parsedUrl.toString(),
+                displayUrl: parsedUrl.toString(),
+                proxyHost: domain,
+                resolvedHost: resolution.address,
+                bypassCache: false,
+                hostingProvider,
+                hnsProfile: resolution.hnsProfile || null,
+                securityInfo: this.buildSecurityInfo('hns-dane', { domain, state: 'verified' })
+            };
+        }
 
         let records = [];
         try {
-            records = await this.hnsResolver.resolveTLSARecords(domain);
+            records = await this.hnsResolver.resolveTLSARecords(domain, {
+                timeout: this.getDaneLookupTimeout()
+            });
         } catch (error) {
-            this.log('hns-dane-resolver-failure', { domain, message: error.message });
+            this.log('hns-dane-resolver-failure', {
+                domain,
+                message: error.message,
+                elapsedMs: Date.now() - startedAt
+            });
             return this.buildHNSHttpsStatusNavigation({
                 originalUrl,
                 fallbackUrl: fallbackUrl.toString(),
@@ -1159,7 +1269,10 @@ class SkyIncludeBrowser {
         }
 
         if (!records.length) {
-            this.log('hns-dane-no-tlsa', { domain });
+            this.log('hns-dane-no-tlsa', {
+                domain,
+                elapsedMs: Date.now() - startedAt
+            });
             return this.buildHNSHttpsStatusNavigation({
                 originalUrl,
                 fallbackUrl: fallbackUrl.toString(),
@@ -1174,11 +1287,16 @@ class SkyIncludeBrowser {
             domain,
             address: resolution.address,
             port: parsedUrl.port ? Number(parsedUrl.port) : 443,
-            timeout: this.settingsManager.getSetting('hnsTimeout') || 15000
+            timeout: this.getDaneProbeTimeout()
         });
 
         if (!probe.ok) {
-            this.log('hns-dane-connection-failure', { domain, state: probe.state, error: probe.error });
+            this.log('hns-dane-connection-failure', {
+                domain,
+                state: probe.state,
+                error: probe.error,
+                elapsedMs: Date.now() - startedAt
+            });
             return this.buildHNSHttpsStatusNavigation({
                 originalUrl,
                 fallbackUrl: fallbackUrl.toString(),
@@ -1199,7 +1317,8 @@ class SkyIncludeBrowser {
             domain,
             state: daneResult.state,
             supportedRecords: daneResult.supportedRecords,
-            unsupportedRecords: daneResult.unsupportedRecords
+            unsupportedRecords: daneResult.unsupportedRecords,
+            elapsedMs: Date.now() - startedAt
         });
 
         if (daneResult.state === 'verified') {

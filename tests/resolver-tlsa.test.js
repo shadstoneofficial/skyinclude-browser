@@ -155,3 +155,93 @@ test('returns tlsa_mismatch for a supported but non-matching TLSA hash', async (
 
     assert.equal(result.state, 'tlsa_mismatch');
 });
+
+test('normalizes bare DoH resolver hostnames', () => {
+    const resolver = new HNSResolver();
+
+    assert.equal(
+        resolver.normalizeDohResolver('hnsdoh.com'),
+        'https://hnsdoh.com/dns-query'
+    );
+    assert.equal(
+        resolver.normalizeDohResolver('https://query.hdns.io'),
+        'https://query.hdns.io/dns-query'
+    );
+});
+
+test('falls back to another DoH resolver for TLSA records', async () => {
+    const resolver = new HNSResolver({
+        getSetting(key) {
+            if (key === 'hnsResolvers') return ['https://primary.invalid/dns-query', 'https://secondary.invalid/dns-query'];
+            if (key === 'hnsTimeout') return 1000;
+            if (key === 'hnsDANE') return true;
+            return null;
+        }
+    });
+    const expected = [{
+        usage: 3,
+        selector: 1,
+        matchingType: 1,
+        certificateAssociationData: 'ab'.repeat(32)
+    }];
+    const attempts = [];
+
+    resolver.queryDoh = async (resolverUrl) => {
+        attempts.push(resolverUrl);
+        if (resolverUrl.includes('primary.invalid')) {
+            throw new Error('HTTP 502: no downstream server available');
+        }
+        return expected;
+    };
+
+    const records = await resolver.resolveTLSARecords('secure.hns', { force: true });
+
+    assert.deepEqual(records, expected);
+    assert.deepEqual(attempts, [
+        'https://primary.invalid/dns-query',
+        'https://secondary.invalid/dns-query'
+    ]);
+});
+
+test('clears TLSA cache with resolver cache', async () => {
+    const resolver = new HNSResolver();
+    resolver.tlsaCache.set('resolver|_443._tcp.secure.hns', { records: [], timestamp: Date.now() });
+    resolver.cache.set('secure.hns', { result: {}, timestamp: Date.now() });
+
+    resolver.clearCache();
+
+    assert.equal(resolver.getCacheStats().size, 0);
+    assert.equal(resolver.getCacheStats().tlsaSize, 0);
+});
+
+test('caches TLSA lookups briefly', async () => {
+    const resolver = new HNSResolver(settingsManager(true));
+    let queryCount = 0;
+    resolver.queryDoh = async () => {
+        queryCount += 1;
+        return [{
+            usage: 3,
+            selector: 1,
+            matchingType: 1,
+            certificateAssociationData: 'ab'.repeat(32)
+        }];
+    };
+
+    const first = await resolver.resolveTLSARecords('secure.hns');
+    const second = await resolver.resolveTLSARecords('secure.hns');
+
+    assert.equal(queryCount, 1);
+    assert.equal(first, second);
+});
+
+test('caps resolver timeout to the app default', () => {
+    const resolver = new HNSResolver({
+        getSetting(key) {
+            if (key === 'hnsTimeout') return 15000;
+            if (key === 'hnsResolvers') return ['https://resolver.invalid/dns-query'];
+            return null;
+        }
+    });
+
+    assert.equal(resolver.getResolverSettings().timeout, 4000);
+});
