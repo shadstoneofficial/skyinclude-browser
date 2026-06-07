@@ -34,9 +34,9 @@
             </div>
 
             <div class="address-bar-container">
-                <div id="security-indicator" class="security-indicator">
+                <button id="security-indicator" class="security-indicator" title="Connection information" aria-label="Connection information">
                     <i class="fas fa-lock"></i>
-                </div>
+                </button>
                 <div id="hosting-indicator" class="hosting-indicator hidden" title="Hosted on GitHub Pages; this is not a security indicator" role="img" aria-label="Hosted on GitHub Pages">
                     <i class="fas fa-github"></i>
                     <span>Pages</span>
@@ -70,6 +70,7 @@
         <!-- Status Bar -->
         <div id="status-bar" class="status-bar hidden">
             <span id="status-text"></span>
+            <button id="status-action" class="status-action hidden"></button>
             <button id="close-status" class="close-status">×</button>
         </div>
 

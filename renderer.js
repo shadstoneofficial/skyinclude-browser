@@ -5,6 +5,7 @@ class SkyIncludeRenderer {
         this.tabs = new Map();
         this.activeTabId = null;
         this.currentUrl = '';
+        this.securityPopoverOpen = false;
         
         this.initializeElements();
         this.setupEventListeners();
@@ -41,6 +42,7 @@ class SkyIncludeRenderer {
         this.menuDropdown = document.getElementById('menu-dropdown');
         this.statusBar = document.getElementById('status-bar');
         this.statusText = document.getElementById('status-text');
+        this.statusActionBtn = document.getElementById('status-action');
         this.closeStatusBtn = document.getElementById('close-status');
         
         // Modals
@@ -83,6 +85,11 @@ class SkyIncludeRenderer {
         this.clearCacheBtn.addEventListener('click', () => this.clearCacheAndReload());
         this.homeBtn.addEventListener('click', () => this.navigateToUrl('skyinclude://home'));
 
+        this.securityIndicator.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this.toggleSecurityPopover();
+        });
+
         this.hnsProfileBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             this.toggleHnsProfilePopover();
@@ -109,6 +116,7 @@ class SkyIncludeRenderer {
         });
         
         // Status bar
+        this.statusActionBtn.addEventListener('click', () => this.handleStatusAction());
         this.closeStatusBtn.addEventListener('click', () => this.hideStatus());
         
         // Modal close buttons
@@ -127,6 +135,10 @@ class SkyIncludeRenderer {
         document.addEventListener('click', (e) => {
             if (!this.menuDropdown.contains(e.target) && !this.menuBtn.contains(e.target)) {
                 this.hideMenu();
+            }
+
+            if (!this.securityIndicator.contains(e.target)) {
+                this.hideSecurityPopover();
             }
 
             if (e.target.classList.contains('modal')) {
@@ -195,7 +207,7 @@ class SkyIncludeRenderer {
         });
 
         window.electronAPI.onShowStatusMessage((data) => {
-            this.showStatus(data.message, data.type || 'info');
+            this.showStatus(data.message, data.type || 'info', data.action || null);
         });
         
         window.electronAPI.onShowHistory(() => {
@@ -218,7 +230,7 @@ class SkyIncludeRenderer {
                 if (activeTab) {
                     this.activeTabId = activeTab.id;
                     this.updateAddressBar(activeTab.url);
-                    this.updateSecurityIndicator(activeTab.url, activeTab.hostingProvider);
+                    this.updateSecurityIndicator(activeTab.url, activeTab.hostingProvider, activeTab.securityInfo);
                     this.updateHostingIndicator(activeTab.hostingProvider);
                     this.updateHnsProfileIndicator(activeTab.hnsProfile);
                     if (activeTab.url === 'skyinclude://home') {
@@ -326,7 +338,7 @@ class SkyIncludeRenderer {
         this.updateAddressBar(data.url);
         this.updateNavigationButtons(data.canGoBack, data.canGoForward);
         this.showLoading(data.loading);
-        this.updateSecurityIndicator(data.url, data.hostingProvider);
+        this.updateSecurityIndicator(data.url, data.hostingProvider, data.securityInfo);
         this.updateHostingIndicator(data.hostingProvider);
         this.updateHnsProfileIndicator(data.hnsProfile);
         if (data.url === 'skyinclude://home') {
@@ -350,7 +362,7 @@ class SkyIncludeRenderer {
             if (!data.loading && data.url) {
                 this.updateAddressBar(data.url);
                 this.updateNavigationButtons(data.canGoBack, data.canGoForward);
-                this.updateSecurityIndicator(data.url, data.hostingProvider);
+                this.updateSecurityIndicator(data.url, data.hostingProvider, data.securityInfo);
             }
 
             if (Object.prototype.hasOwnProperty.call(data, 'hostingProvider')) {
@@ -372,6 +384,9 @@ class SkyIncludeRenderer {
             if (Object.prototype.hasOwnProperty.call(data, 'hnsProfile')) {
                 tab.hnsProfile = data.hnsProfile;
             }
+            if (Object.prototype.hasOwnProperty.call(data, 'securityInfo')) {
+                tab.securityInfo = data.securityInfo;
+            }
             if (Object.prototype.hasOwnProperty.call(data, 'favicon')) {
                 tab.favicon = data.favicon;
             }
@@ -379,31 +394,127 @@ class SkyIncludeRenderer {
         }
     }
 
-    updateSecurityIndicator(url, hostingProvider = null) {
+    updateSecurityIndicator(url, hostingProvider = null, securityInfo = null) {
         const icon = this.securityIndicator.querySelector('i');
-
-        if (hostingProvider === 'github-pages') {
-            icon.className = 'fas fa-github';
-            this.securityIndicator.className = 'security-indicator hosting-github';
-            this.securityIndicator.title = 'Hosted on GitHub Pages';
-            return;
-        }
+        this.currentSecurityInfo = securityInfo || this.deriveSecurityInfo(url, hostingProvider);
+        const level = this.currentSecurityInfo?.level || 'neutral';
         
-        if (url.startsWith('https://')) {
+        if (level === 'secure') {
             icon.className = 'fas fa-lock';
             this.securityIndicator.className = 'security-indicator';
-        } else if (url.startsWith('http://')) {
+        } else if (level === 'hns-dane') {
+            icon.className = 'fas fa-lock';
+            this.securityIndicator.className = 'security-indicator hns-dane';
+        } else if (level === 'warning') {
             icon.className = 'fas fa-exclamation-triangle';
             this.securityIndicator.className = 'security-indicator warning';
-        } else if (url.startsWith('skyinclude://')) {
+        } else if (level === 'danger') {
+            icon.className = 'fas fa-exclamation-triangle';
+            this.securityIndicator.className = 'security-indicator insecure';
+        } else if (level === 'local') {
             icon.className = 'fas fa-home';
-            this.securityIndicator.className = 'security-indicator';
+            this.securityIndicator.className = 'security-indicator neutral';
         } else {
             icon.className = 'fas fa-globe';
-            this.securityIndicator.className = 'security-indicator';
+            this.securityIndicator.className = 'security-indicator neutral';
         }
 
-        this.securityIndicator.title = '';
+        this.securityIndicator.title = this.currentSecurityInfo?.title || 'Connection information';
+        this.securityIndicator.setAttribute('aria-label', this.securityIndicator.title);
+    }
+
+    deriveSecurityInfo(url, hostingProvider = null) {
+        if (url?.startsWith('skyinclude://')) {
+            return {
+                level: 'local',
+                title: 'SkyInclude start page',
+                summary: 'This is a local SkyInclude Browser page.',
+                details: [
+                    ['Page source', 'Bundled with the SkyInclude Browser app'],
+                    ['Network connection', 'None for this page']
+                ]
+            };
+        }
+
+        if (url?.startsWith('https://')) {
+            return {
+                level: 'secure',
+                title: 'HTTPS connection',
+                summary: 'Chromium is using its normal HTTPS certificate validation for this site.',
+                details: [
+                    ['Encryption', 'HTTPS/TLS'],
+                    ['Certificate validation', 'WebPKI validation handled by Chromium'],
+                    ['Hosting', hostingProvider === 'github-pages' ? 'GitHub Pages' : 'Not identified by SkyInclude']
+                ]
+            };
+        }
+
+        if (url?.startsWith('http://') || this.isLikelyHnsDisplayUrl(url)) {
+            return {
+                level: 'warning',
+                title: 'Native HNS HTTP',
+                summary: 'SkyInclude resolved this name through Handshake/HNS, but this page is not encrypted.',
+                details: [
+                    ['HNS resolution', 'Handled by SkyInclude through the local HNS proxy'],
+                    ['Encryption', 'Not encrypted'],
+                    ['DANE/TLSA', 'Not verified for this HTTP page']
+                ]
+            };
+        }
+
+        return {
+            level: 'neutral',
+            title: 'Connection information',
+            summary: 'No additional security information is available for this page.',
+            details: [
+                ['Address', url || 'New tab']
+            ]
+        };
+    }
+
+    isLikelyHnsDisplayUrl(url) {
+        if (!url || url.includes('://')) {
+            return false;
+        }
+
+        const host = String(url).split(/[/?#]/)[0];
+        return /^[a-z0-9-]+(\.[a-z0-9-]+)*$/i.test(host);
+    }
+
+    toggleSecurityPopover() {
+        if (!this.securityPopoverOpen) {
+            this.showSecurityPopover();
+            return;
+        }
+
+        this.hideSecurityPopover();
+    }
+
+    async showSecurityPopover() {
+        const info = this.currentSecurityInfo || this.deriveSecurityInfo(this.currentUrl);
+        const rect = this.securityIndicator.getBoundingClientRect();
+
+        try {
+            await window.electronAPI.showSecurityPopover({
+                info,
+                anchor: {
+                    left: rect.left,
+                    bottom: rect.bottom
+                }
+            });
+            this.securityPopoverOpen = true;
+        } catch (error) {
+            console.error('Failed to show security popover:', error);
+        }
+    }
+
+    async hideSecurityPopover() {
+        this.securityPopoverOpen = false;
+        try {
+            await window.electronAPI.hideSecurityPopover();
+        } catch (error) {
+            console.error('Failed to hide security popover:', error);
+        }
     }
 
     updateHostingIndicator(hostingProvider) {
@@ -521,7 +632,7 @@ class SkyIncludeRenderer {
             this.activeTabId = data.tabId;
             this.updateAddressBar(tab.url);
             this.updateNavigationButtons(tab.canGoBack, tab.canGoForward);
-            this.updateSecurityIndicator(tab.url, tab.hostingProvider);
+            this.updateSecurityIndicator(tab.url, tab.hostingProvider, tab.securityInfo);
             this.updateHostingIndicator(tab.hostingProvider);
             this.updateHnsProfileIndicator(tab.hnsProfile);
         }
@@ -664,13 +775,36 @@ class SkyIncludeRenderer {
     }
 
     // Status and error handling
-    showStatus(message, type = 'info') {
+    showStatus(message, type = 'info', action = null) {
         this.statusText.textContent = message;
         this.statusBar.className = `status-bar ${type}`;
         this.statusBar.classList.remove('hidden');
-        
-        // Auto-hide after 5 seconds
-        setTimeout(() => this.hideStatus(), 5000);
+        this.setStatusBarVisible(true);
+        this.currentStatusAction = action && action.url ? action : null;
+
+        if (this.currentStatusAction) {
+            this.statusActionBtn.textContent = this.currentStatusAction.label || 'Open';
+            this.statusActionBtn.title = this.currentStatusAction.url;
+            this.statusActionBtn.classList.remove('hidden');
+        } else {
+            this.statusActionBtn.classList.add('hidden');
+            this.statusActionBtn.textContent = '';
+            this.statusActionBtn.title = '';
+        }
+
+        if (!this.currentStatusAction) {
+            setTimeout(() => this.hideStatus(), 5000);
+        }
+    }
+
+    handleStatusAction() {
+        if (!this.currentStatusAction?.url) {
+            return;
+        }
+
+        const url = this.currentStatusAction.url;
+        this.hideStatus();
+        this.navigateToUrl(url);
     }
 
     showError(message) {
@@ -679,6 +813,19 @@ class SkyIncludeRenderer {
 
     hideStatus() {
         this.statusBar.classList.add('hidden');
+        this.setStatusBarVisible(false);
+        this.currentStatusAction = null;
+        this.statusActionBtn.classList.add('hidden');
+        this.statusActionBtn.textContent = '';
+        this.statusActionBtn.title = '';
+    }
+
+    async setStatusBarVisible(visible) {
+        try {
+            await window.electronAPI.setStatusBarVisible(visible);
+        } catch (error) {
+            console.error('Failed to update status bar layout:', error);
+        }
     }
 
     // Modal handling

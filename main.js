@@ -3,6 +3,8 @@ const path = require('path');
 const fs = require('fs');
 const { URL, fileURLToPath } = require('url');
 const http = require('http');
+const net = require('net');
+const crypto = require('crypto');
 
 // Initialize managers
 const SettingsManager = require('./settings.js');
@@ -24,6 +26,11 @@ class SkyIncludeBrowser {
         this.hnsProxyHosts = new Map();
         this.hnsProxyPort = null;
         this.hnsProxyServer = null;
+        this.statusBarVisible = false;
+        this.daneVerifiedCertificates = new Map();
+        this.daneTrustTtlMs = 5 * 60 * 1000;
+        this.certificateVerifierConfiguredSessions = new WeakSet();
+        this.securityPopover = null;
         this.hnsProfilePopover = null;
         this.proxyConfiguredSessions = new WeakSet();
         this.githubPagesAddresses = new Set([
@@ -199,7 +206,8 @@ class SkyIncludeBrowser {
             canGoForward: false,
             favicon: null,
             hostingProvider: null,
-            hnsProfile: null
+            hnsProfile: null,
+            securityInfo: null
         });
 
         this.switchToTab(tabId);
@@ -233,7 +241,8 @@ class SkyIncludeBrowser {
             loading: tab.loading,
             favicon: tab.favicon,
             hostingProvider: tab.hostingProvider,
-            hnsProfile: tab.hnsProfile
+            hnsProfile: tab.hnsProfile,
+            securityInfo: tab.securityInfo
         });
     }
 
@@ -311,6 +320,214 @@ class SkyIncludeBrowser {
         }
     }
 
+    buildSecurityInfo(type, options = {}) {
+        const domain = options.domain || null;
+        const state = options.state || null;
+        const tlsaName = domain ? `_443._tcp.${domain}` : 'TLSA service name';
+        const hnsDetails = domain ? [
+            ['HNS name', domain],
+            ['HNS resolution', 'Resolved by SkyInclude before page load']
+        ] : [];
+
+        if (type === 'local-home') {
+            return {
+                level: 'local',
+                title: 'SkyInclude start page',
+                summary: 'This is a local SkyInclude Browser page.',
+                details: [
+                    ['Page source', 'Bundled with the SkyInclude Browser app'],
+                    ['Network connection', 'None for this page']
+                ]
+            };
+        }
+
+        if (type === 'hns-http') {
+            return {
+                level: 'warning',
+                title: 'Native HNS HTTP',
+                summary: 'This name resolved through Handshake/HNS, but this page is loaded over HTTP and is not encrypted.',
+                details: [
+                    ...hnsDetails,
+                    ['Encryption', 'Not encrypted'],
+                    ['DANE/TLSA', 'Not checked for this HTTP page']
+                ]
+            };
+        }
+
+        if (type === 'hns-unresolved') {
+            return {
+                level: 'danger',
+                title: 'HNS site not resolved',
+                summary: 'SkyInclude could not find a browsable HNS A/AAAA/CNAME record for this name.',
+                details: [
+                    ['HNS name', domain || 'Unknown'],
+                    ['Resolution', 'No browsable address record found'],
+                    ['DANE/TLSA', 'Cannot verify without a reachable HTTPS server']
+                ]
+            };
+        }
+
+        if (type === 'hns-dane') {
+            const states = {
+                verified: {
+                    level: 'hns-dane',
+                    title: 'HNS DANE verified',
+                    summary: 'The HTTPS server certificate matches the published HNS TLSA record. SkyInclude is allowing this exact HNS hostname and certificate fingerprint for this session.',
+                    dane: 'TLSA matched certificate or public key'
+                },
+                no_tlsa: {
+                    level: 'warning',
+                    title: 'No HNS TLSA record',
+                    summary: 'This HNS name can still be opened through native HNS HTTP, but it is not DANE verified.',
+                    dane: `No TLSA record found at ${tlsaName}`
+                },
+                tlsa_mismatch: {
+                    level: 'danger',
+                    title: 'HNS TLSA mismatch',
+                    summary: 'The site published TLSA data, but it does not match the HTTPS server certificate.',
+                    dane: 'TLSA record did not match the inspected certificate'
+                },
+                cert_expired: {
+                    level: 'danger',
+                    title: 'Certificate expired',
+                    summary: 'The HTTPS certificate is expired, so SkyInclude cannot treat this HNS HTTPS endpoint as verified.',
+                    dane: 'Certificate failed validity checks'
+                },
+                cert_not_yet_valid: {
+                    level: 'danger',
+                    title: 'Certificate not yet valid',
+                    summary: 'The HTTPS certificate is not valid yet, so SkyInclude cannot treat this HNS HTTPS endpoint as verified.',
+                    dane: 'Certificate failed validity checks'
+                },
+                unsupported_record: {
+                    level: 'danger',
+                    title: 'Unsupported TLSA record',
+                    summary: 'The site published TLSA data using a format this version does not support yet.',
+                    dane: 'TLSA exists but is outside the current MVP subset'
+                },
+                resolver_failure: {
+                    level: 'danger',
+                    title: 'TLSA resolver failure',
+                    summary: 'SkyInclude could not complete the HNS TLSA lookup for this site.',
+                    dane: options.error || 'TLSA lookup failed'
+                },
+                connection_failure: {
+                    level: 'danger',
+                    title: 'HTTPS certificate probe failed',
+                    summary: 'SkyInclude could not inspect this site\'s HTTPS certificate.',
+                    dane: options.error || 'HTTPS certificate probe failed'
+                }
+            };
+            const details = states[state] || states.connection_failure;
+            return {
+                level: details.level,
+                title: details.title,
+                summary: details.summary,
+                details: [
+                    ...hnsDetails,
+                    ['TLSA record', details.dane],
+                    ['Certificate validation', state === 'verified'
+                        ? 'Verified against HNS TLSA data by SkyInclude'
+                        : 'Not verified'],
+                    ['Page rendering', state === 'verified'
+                        ? 'Allowed for this exact HNS hostname and certificate fingerprint'
+                        : 'Direct native HNS HTTPS rendering is not enabled for this state']
+                ]
+            };
+        }
+
+        return null;
+    }
+
+    normalizeCertificateFingerprint(value) {
+        return String(value || '').replace(/:/g, '').toLowerCase();
+    }
+
+    getCertificateFingerprint(certificate) {
+        const knownFingerprint = this.normalizeCertificateFingerprint(certificate?.fingerprint256 || certificate?.fingerprint);
+        if (knownFingerprint) {
+            return knownFingerprint;
+        }
+
+        if (certificate?.raw && Buffer.isBuffer(certificate.raw)) {
+            return crypto.createHash('sha256').update(certificate.raw).digest('hex');
+        }
+
+        return '';
+    }
+
+    getCertificateFingerprints(certificate) {
+        const fingerprints = new Set([
+            this.normalizeCertificateFingerprint(certificate?.fingerprint256),
+            this.normalizeCertificateFingerprint(certificate?.fingerprint)
+        ].filter(Boolean));
+
+        if (certificate?.raw && Buffer.isBuffer(certificate.raw)) {
+            fingerprints.add(crypto.createHash('sha256').update(certificate.raw).digest('hex'));
+        }
+
+        if (certificate?.data) {
+            try {
+                const x509 = new crypto.X509Certificate(certificate.data);
+                fingerprints.add(crypto.createHash('sha256').update(x509.raw).digest('hex'));
+            } catch (error) {
+                // Electron certificate data is platform-shaped; ignore if it is not parseable PEM/DER.
+            }
+        }
+
+        return Array.from(fingerprints);
+    }
+
+    rememberDaneVerifiedCertificate(domain, certificate) {
+        const normalizedDomain = this.normalizeGatewayHost(String(domain || '').toLowerCase());
+        const fingerprints = this.getCertificateFingerprints(certificate);
+        if (!normalizedDomain || !fingerprints.length || !this.isHNSDomain(normalizedDomain)) {
+            return null;
+        }
+
+        const validTo = this.hnsResolver.normalizeCertificateDate(
+            this.hnsResolver.getCertificateDate(certificate, 'valid_to', 'validTo')
+        );
+        const expiresAt = Math.min(
+            Date.now() + this.daneTrustTtlMs,
+            validTo || Date.now() + this.daneTrustTtlMs
+        );
+
+        if (expiresAt <= Date.now()) {
+            return null;
+        }
+
+        const trust = {
+            domain: normalizedDomain,
+            fingerprints,
+            expiresAt
+        };
+        this.daneVerifiedCertificates.set(normalizedDomain, trust);
+        this.log('hns-dane-trust-added', {
+            domain: normalizedDomain,
+            fingerprint: fingerprints[0],
+            expiresAt
+        });
+
+        return trust;
+    }
+
+    isDaneVerifiedCertificateAllowed(hostname, certificate) {
+        const normalizedHostname = this.normalizeGatewayHost(String(hostname || '').toLowerCase());
+        if (!normalizedHostname || !this.isHNSDomain(normalizedHostname)) {
+            return false;
+        }
+
+        const trust = this.daneVerifiedCertificates.get(normalizedHostname);
+        if (!trust || trust.expiresAt <= Date.now()) {
+            this.daneVerifiedCertificates.delete(normalizedHostname);
+            return false;
+        }
+
+        const fingerprints = this.getCertificateFingerprints(certificate);
+        return fingerprints.some(fingerprint => trust.fingerprints.includes(fingerprint));
+    }
+
     sendTabUpdated(tab) {
         if (!this.mainWindow || this.mainWindow.isDestroyed()) {
             return;
@@ -324,6 +541,7 @@ class SkyIncludeBrowser {
             favicon: tab.favicon,
             hostingProvider: tab.hostingProvider,
             hnsProfile: tab.hnsProfile,
+            securityInfo: tab.securityInfo,
             canGoBack: tab.view.webContents.canGoBack(),
             canGoForward: tab.view.webContents.canGoForward(),
             active: tab.id === this.activeTabId
@@ -335,7 +553,7 @@ class SkyIncludeBrowser {
             return;
         }
 
-        const topChromeHeight = 88;
+        const topChromeHeight = this.statusBarVisible ? 130 : 88;
         const [width, height] = this.mainWindow.getContentSize();
         this.currentView.setBounds({
             x: 0,
@@ -343,6 +561,11 @@ class SkyIncludeBrowser {
             width,
             height: Math.max(0, height - topChromeHeight)
         });
+    }
+
+    setStatusBarVisible(visible) {
+        this.statusBarVisible = visible === true;
+        this.updateCurrentViewBounds();
     }
 
     setBrowserViewVisible(visible) {
@@ -396,7 +619,8 @@ class SkyIncludeBrowser {
             tab.hostingProvider = null;
             tab.hnsProfile = null;
             tab.favicon = null;
-            this.mainWindow.webContents.send('loading-changed', { tabId, loading: true, hostingProvider: null, hnsProfile: null, favicon: null });
+            tab.securityInfo = null;
+            this.mainWindow.webContents.send('loading-changed', { tabId, loading: true, hostingProvider: null, hnsProfile: null, securityInfo: null, favicon: null });
 
             let finalUrl = inputUrl;
             let loadOptions = {};
@@ -405,6 +629,7 @@ class SkyIncludeBrowser {
             if (inputUrl === 'skyinclude://home' || inputUrl === '') {
                 finalUrl = `file://${path.join(__dirname, 'announcement.html')}`;
                 tab.displayUrl = 'skyinclude://home';
+                tab.securityInfo = this.buildSecurityInfo('local-home');
             } else {
                 // Check if it's an HNS domain or needs resolution
                 const resolved = await this.resolveUrl(inputUrl);
@@ -413,6 +638,8 @@ class SkyIncludeBrowser {
                 tab.displayUrl = resolved.displayUrl || inputUrl;
                 tab.hostingProvider = resolved.hostingProvider || null;
                 tab.hnsProfile = resolved.hnsProfile || null;
+                tab.securityInfo = resolved.securityInfo || null;
+                tab.pendingHttpsAvailabilityCheck = resolved.httpsAvailabilityCheck || null;
 
                 if (resolved.proxyHost && resolved.resolvedHost) {
                     this.hnsProxyHosts.set(resolved.proxyHost, resolved.resolvedHost);
@@ -468,9 +695,21 @@ class SkyIncludeBrowser {
                 canGoBack: tab.canGoBack,
                 canGoForward: tab.canGoForward,
                 hostingProvider: tab.hostingProvider,
-                hnsProfile: tab.hnsProfile
+                hnsProfile: tab.hnsProfile,
+                securityInfo: tab.securityInfo
             });
             this.sendTabUpdated(tab);
+
+            if (tab.id === this.activeTabId && tab.pendingHttpsAvailabilityCheck) {
+                const check = tab.pendingHttpsAvailabilityCheck;
+                delete tab.pendingHttpsAvailabilityCheck;
+                this.checkHnsHttpsAvailability(tab.id, check).catch(error => {
+                    this.log('hns-https-availability-error', {
+                        domain: check.domain,
+                        message: error.message
+                    });
+                });
+            }
 
             // Add to history
             this.addToHistory(tab.url, this.getHistoryTitle(tab), tab.favicon);
@@ -480,7 +719,7 @@ class SkyIncludeBrowser {
             this.log('load-error', { tabId, inputUrl, message: error.message, code: error.code });
             if (this.isExpectedNavigationAbort(error)) {
                 tab.loading = false;
-                this.mainWindow.webContents.send('loading-changed', { tabId, loading: false, url: tab.url });
+                this.mainWindow.webContents.send('loading-changed', { tabId, loading: false, url: tab.url, securityInfo: tab.securityInfo });
                 return;
             }
             console.error('Failed to load URL:', error);
@@ -569,6 +808,7 @@ class SkyIncludeBrowser {
                 tab.title = 'New Tab';
                 tab.hostingProvider = null;
                 tab.hnsProfile = null;
+                tab.securityInfo = this.buildSecurityInfo('local-home');
                 this.mainWindow.webContents.send('loading-changed', {
                     tabId,
                     loading: false,
@@ -576,15 +816,32 @@ class SkyIncludeBrowser {
                     canGoBack: tab.view.webContents.canGoBack(),
                     canGoForward: tab.view.webContents.canGoForward(),
                     hostingProvider: tab.hostingProvider,
-                    hnsProfile: tab.hnsProfile
+                    hnsProfile: tab.hnsProfile,
+                    securityInfo: tab.securityInfo
                 });
                 this.sendTabUpdated(tab);
                 return;
             }
 
             if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+                if (parsedUrl.protocol === 'data:' && tab.securityInfo) {
+                    this.mainWindow.webContents.send('loading-changed', {
+                        tabId,
+                        loading: false,
+                        url: tab.url,
+                        canGoBack: tab.view.webContents.canGoBack(),
+                        canGoForward: tab.view.webContents.canGoForward(),
+                        hostingProvider: tab.hostingProvider,
+                        hnsProfile: tab.hnsProfile,
+                        securityInfo: tab.securityInfo
+                    });
+                    this.sendTabUpdated(tab);
+                    return;
+                }
+
                 tab.hostingProvider = null;
                 tab.hnsProfile = null;
+                tab.securityInfo = null;
                 this.mainWindow.webContents.send('loading-changed', {
                     tabId,
                     loading: false,
@@ -592,7 +849,8 @@ class SkyIncludeBrowser {
                     canGoBack: tab.view.webContents.canGoBack(),
                     canGoForward: tab.view.webContents.canGoForward(),
                     hostingProvider: tab.hostingProvider,
-                    hnsProfile: tab.hnsProfile
+                    hnsProfile: tab.hnsProfile,
+                    securityInfo: tab.securityInfo
                 });
                 this.sendTabUpdated(tab);
                 return;
@@ -601,9 +859,11 @@ class SkyIncludeBrowser {
             if (this.isIPAddress(parsedUrl.hostname)) {
                 tab.hostingProvider = null;
                 tab.hnsProfile = null;
+                tab.securityInfo = null;
             } else if (!this.isHNSDomain(parsedUrl.hostname)) {
                 tab.hostingProvider = this.getHostingProviderForUrl(parsedUrl.toString());
                 tab.hnsProfile = null;
+                tab.securityInfo = null;
             } else {
                 await this.updateHNSMetadataForNavigation(tab, parsedUrl);
             }
@@ -621,7 +881,8 @@ class SkyIncludeBrowser {
                 canGoBack: tab.view.webContents.canGoBack(),
                 canGoForward: tab.view.webContents.canGoForward(),
                 hostingProvider: tab.hostingProvider,
-                hnsProfile: tab.hnsProfile
+                hnsProfile: tab.hnsProfile,
+                securityInfo: tab.securityInfo
             });
             this.sendTabUpdated(tab);
         } catch (error) {
@@ -636,6 +897,9 @@ class SkyIncludeBrowser {
             if (resolution) {
                 tab.hostingProvider = this.getHostingProviderForResolution(resolution);
                 tab.hnsProfile = resolution.hnsProfile || null;
+                tab.securityInfo = parsedUrl.protocol === 'http:'
+                    ? this.buildSecurityInfo('hns-http', { domain: hostname })
+                    : tab.securityInfo;
                 if (resolution.address) {
                     this.hnsProxyHosts.set(hostname, resolution.address);
                 }
@@ -647,6 +911,7 @@ class SkyIncludeBrowser {
 
         tab.hostingProvider = null;
         tab.hnsProfile = null;
+        tab.securityInfo = this.buildSecurityInfo('hns-unresolved', { domain: hostname });
     }
 
     normalizeGatewayUrl(inputUrl) {
@@ -753,6 +1018,79 @@ class SkyIncludeBrowser {
         };
     }
 
+    buildHttpsUpgradeUrl(parsedUrl, domain) {
+        const upgradeUrl = new URL(parsedUrl.toString());
+        upgradeUrl.protocol = 'https:';
+        upgradeUrl.hostname = domain;
+        upgradeUrl.port = '';
+        return upgradeUrl.toString();
+    }
+
+    async checkHnsHttpsAvailability(tabId, check) {
+        if (!check?.domain || !check?.address || !check?.upgradeUrl) {
+            return;
+        }
+
+        const tab = this.tabs.get(tabId);
+        if (!tab || tab.id !== this.activeTabId || tab.loading) {
+            return;
+        }
+
+        let records = [];
+        try {
+            records = await this.hnsResolver.resolveTLSARecords(check.domain);
+        } catch (error) {
+            this.log('hns-https-availability-tlsa-error', { domain: check.domain, message: error.message });
+            return;
+        }
+
+        if (!records.length) {
+            this.log('hns-https-availability-none', { domain: check.domain });
+            return;
+        }
+
+        const probe = await inspectHnsHttpsCertificate({
+            domain: check.domain,
+            address: check.address,
+            port: check.port || 443,
+            timeout: this.settingsManager.getSetting('hnsTimeout') || 15000
+        });
+
+        if (!probe.ok) {
+            this.log('hns-https-availability-probe-failed', {
+                domain: check.domain,
+                state: probe.state,
+                error: probe.error
+            });
+            return;
+        }
+
+        const daneResult = await this.hnsResolver.verifyDANE(check.domain, probe.certificate, {
+            force: true,
+            records
+        });
+
+        this.log('hns-https-availability-dane-result', {
+            domain: check.domain,
+            state: daneResult.state,
+            supportedRecords: daneResult.supportedRecords,
+            unsupportedRecords: daneResult.unsupportedRecords
+        });
+
+        if (daneResult.state !== 'verified') {
+            return;
+        }
+
+        if (this.tabs.get(tabId) !== tab || tab.id !== this.activeTabId || tab.loading) {
+            return;
+        }
+
+        this.sendStatusMessage(`DANE-verified HTTPS is available for ${check.domain}.`, 'success', {
+            label: 'Open HTTPS',
+            url: check.upgradeUrl
+        });
+    }
+
     async buildHNSNavigation(originalUrl, resolution) {
         const parsedUrl = new URL(originalUrl);
         const hostingProvider = this.getHostingProviderForResolution(resolution);
@@ -780,7 +1118,14 @@ class SkyIncludeBrowser {
                 resolvedHost: resolution.address,
                 bypassCache: true,
                 hostingProvider,
-                hnsProfile: resolution.hnsProfile || null
+                hnsProfile: resolution.hnsProfile || null,
+                securityInfo: this.buildSecurityInfo('hns-http', { domain: resolution.domain }),
+                httpsAvailabilityCheck: {
+                    domain: resolution.domain,
+                    address: resolution.address,
+                    port: 443,
+                    upgradeUrl: this.buildHttpsUpgradeUrl(parsedUrl, resolution.domain)
+                }
             };
         }
 
@@ -857,6 +1202,32 @@ class SkyIncludeBrowser {
             unsupportedRecords: daneResult.unsupportedRecords
         });
 
+        if (daneResult.state === 'verified') {
+            const trust = this.rememberDaneVerifiedCertificate(domain, probe.certificate);
+            if (trust) {
+                return {
+                    url: parsedUrl.toString(),
+                    displayUrl: parsedUrl.toString(),
+                    proxyHost: domain,
+                    resolvedHost: resolution.address,
+                    bypassCache: true,
+                    hostingProvider,
+                    hnsProfile: resolution.hnsProfile || null,
+                    securityInfo: this.buildSecurityInfo('hns-dane', { domain, state: daneResult.state })
+                };
+            }
+
+            return this.buildHNSHttpsStatusNavigation({
+                originalUrl,
+                fallbackUrl: fallbackUrl.toString(),
+                domain,
+                state: 'connection_failure',
+                error: 'DANE verified, but SkyInclude could not pin the certificate fingerprint for rendering.',
+                hostingProvider,
+                hnsProfile: resolution.hnsProfile || null
+            });
+        }
+
         return this.buildHNSHttpsStatusNavigation({
             originalUrl,
             fallbackUrl: fallbackUrl.toString(),
@@ -875,7 +1246,8 @@ class SkyIncludeBrowser {
             displayUrl: `${domain}${parsedUrl.pathname}${parsedUrl.search}${parsedUrl.hash}`,
             bypassCache: true,
             hostingProvider,
-            hnsProfile
+            hnsProfile,
+            securityInfo: this.buildSecurityInfo('hns-dane', { domain, state, error })
         };
     }
 
@@ -1026,7 +1398,8 @@ ${error ? `<p class="error">${this.escapeHtml(error)}</p>` : ''}
             proxyHost: parsedUrl.hostname,
             hostingProvider: null,
             hnsProfile: null,
-            bypassCache: true
+            bypassCache: true,
+            securityInfo: this.buildSecurityInfo('hns-unresolved', { domain: parsedUrl.hostname })
         };
     }
 
@@ -1067,7 +1440,8 @@ ${error ? `<p class="error">${this.escapeHtml(error)}</p>` : ''}
             displayUrl: `${hostname}${parsedUrl.pathname}${parsedUrl.search}${parsedUrl.hash}`,
             bypassCache: true,
             hostingProvider: null,
-            hnsProfile: null
+            hnsProfile: null,
+            securityInfo: this.buildSecurityInfo('hns-unresolved', { domain: hostname })
         };
     }
 
@@ -1157,6 +1531,9 @@ ${error ? `<p class="error">${this.escapeHtml(error)}</p>` : ''}
         this.hnsProxyServer = http.createServer((clientReq, clientRes) => {
             this.handleHnsProxyRequest(clientReq, clientRes);
         });
+        this.hnsProxyServer.on('connect', (clientReq, clientSocket, head) => {
+            this.handleHnsProxyConnect(clientReq, clientSocket, head);
+        });
 
         await new Promise((resolve, reject) => {
             this.hnsProxyServer.once('error', reject);
@@ -1174,12 +1551,14 @@ ${error ? `<p class="error">${this.escapeHtml(error)}</p>` : ''}
             await this.startHnsProxy();
         }
 
+        this.configureDaneCertificateVerifierForSession(electronSession);
+
         if (this.proxyConfiguredSessions.has(electronSession)) {
             return;
         }
 
         await electronSession.setProxy({
-            proxyRules: `http=127.0.0.1:${this.hnsProxyPort}`,
+            proxyRules: `http=127.0.0.1:${this.hnsProxyPort};https=127.0.0.1:${this.hnsProxyPort}`,
             proxyBypassRules: 'localhost;127.0.0.1'
         });
 
@@ -1192,20 +1571,39 @@ ${error ? `<p class="error">${this.escapeHtml(error)}</p>` : ''}
         this.log('proxy-configured', { port: this.hnsProxyPort, proxyForHns });
     }
 
-    buildProxyPacScript() {
-        const port = this.hnsProxyPort || 0;
-        return `
-            function FindProxyForURL(url, host) {
-                if (host === "localhost" || host === "127.0.0.1") return "DIRECT";
-                if (dnsDomainIs(host, ".mercenary") || dnsDomainIs(host, ".mastermind") ||
-                    dnsDomainIs(host, ".skyinclude") || host === "skyinclude" ||
-                    dnsDomainIs(host, ".agent") || dnsDomainIs(host, ".chatbot") ||
-                    shExpMatch(host, "*.hns.to")) {
-                    return "PROXY 127.0.0.1:${port}";
-                }
-                return "DIRECT";
+    configureDaneCertificateVerifierForSession(electronSession) {
+        if (this.certificateVerifierConfiguredSessions.has(electronSession)) {
+            return;
+        }
+
+        electronSession.setCertificateVerifyProc((request, callback) => {
+            const hostname = this.normalizeGatewayHost(String(request.hostname || '').toLowerCase());
+            const certificate = request.certificate || null;
+
+            if (this.isDaneVerifiedCertificateAllowed(hostname, certificate)) {
+                this.log('hns-dane-cert-accepted', { hostname });
+                callback(0);
+                return;
             }
-        `;
+
+            const verificationResult = String(request.verificationResult || '').toUpperCase();
+            if (request.errorCode === 0 || verificationResult === 'OK') {
+                callback(0);
+                return;
+            }
+
+            if (hostname && this.isHNSDomain(hostname)) {
+                this.log('hns-dane-cert-rejected', {
+                    hostname,
+                    verificationResult: request.verificationResult || null,
+                    errorCode: request.errorCode || null
+                });
+            }
+
+            callback(-2);
+        });
+
+        this.certificateVerifierConfiguredSessions.add(electronSession);
     }
 
     async handleHnsProxyRequest(clientReq, clientRes) {
@@ -1221,6 +1619,10 @@ ${error ? `<p class="error">${this.escapeHtml(error)}</p>` : ''}
                 if (address) {
                     this.hnsProxyHosts.set(host, address);
                 }
+            }
+
+            if (!isHnsHost) {
+                address = requestUrl.hostname;
             }
 
             if (isHnsHost && !address) {
@@ -1265,6 +1667,63 @@ ${error ? `<p class="error">${this.escapeHtml(error)}</p>` : ''}
             this.log('hns-proxy-request-error', { url: clientReq.url, message: error.message });
             clientRes.writeHead(500, { 'Content-Type': 'text/plain' });
             clientRes.end(error.message);
+        }
+    }
+
+    async handleHnsProxyConnect(clientReq, clientSocket, head) {
+        try {
+            const [rawHost, rawPort] = String(clientReq.url || '').split(':');
+            const host = this.normalizeGatewayHost(String(rawHost || '').toLowerCase());
+            const port = Number(rawPort) || 443;
+            const isHnsHost = this.isHNSDomain(host);
+
+            let address = isHnsHost ? this.hnsProxyHosts.get(host) : rawHost;
+            if (isHnsHost && !address) {
+                const resolution = await this.resolveHNS(host);
+                address = resolution && resolution.address;
+                if (address) {
+                    this.hnsProxyHosts.set(host, address);
+                }
+            }
+
+            if (isHnsHost && !address) {
+                clientSocket.write('HTTP/1.1 502 Bad Gateway\r\n\r\n');
+                clientSocket.destroy();
+                return;
+            }
+
+            this.log('hns-proxy-connect', {
+                host,
+                address,
+                port
+            });
+
+            const upstreamSocket = net.connect(port, address, () => {
+                clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+                if (head && head.length) {
+                    upstreamSocket.write(head);
+                }
+                upstreamSocket.pipe(clientSocket);
+                clientSocket.pipe(upstreamSocket);
+            });
+
+            upstreamSocket.on('error', error => {
+                this.log('hns-proxy-connect-error', { host, address, message: error.message });
+                if (!clientSocket.destroyed) {
+                    clientSocket.write('HTTP/1.1 502 Bad Gateway\r\n\r\n');
+                    clientSocket.destroy();
+                }
+            });
+
+            clientSocket.on('error', () => {
+                upstreamSocket.destroy();
+            });
+        } catch (error) {
+            this.log('hns-proxy-connect-request-error', { url: clientReq.url, message: error.message });
+            if (!clientSocket.destroyed) {
+                clientSocket.write('HTTP/1.1 500 Internal Server Error\r\n\r\n');
+                clientSocket.destroy();
+            }
         }
     }
 
@@ -1465,6 +1924,134 @@ ${error ? `<p class="error">${this.escapeHtml(error)}</p>` : ''}
         this.sendStatusMessage('If you install an update, fully quit and reopen SkyInclude Browser.', 'info');
     }
 
+    showSecurityPopover(payload = {}) {
+        if (!this.mainWindow || this.mainWindow.isDestroyed()) {
+            return;
+        }
+
+        const info = this.sanitizeSecurityInfo(payload.info);
+        const anchor = payload.anchor && typeof payload.anchor === 'object' ? payload.anchor : {};
+        const parentBounds = this.mainWindow.getBounds();
+        const width = 370;
+        const height = Math.min(520, 122 + info.details.length * 56);
+        const x = Math.min(
+            Math.max(parentBounds.x + 12, parentBounds.x + Math.round(Number(anchor.left) || 0) - 18),
+            parentBounds.x + parentBounds.width - width - 12
+        );
+        const y = Math.min(
+            parentBounds.y + parentBounds.height - height - 12,
+            parentBounds.y + Math.round(Number(anchor.bottom) || 90) + 8
+        );
+
+        this.closeSecurityPopover();
+        this.securityPopover = new BrowserWindow({
+            parent: this.mainWindow,
+            x,
+            y,
+            width,
+            height,
+            frame: false,
+            resizable: false,
+            minimizable: false,
+            maximizable: false,
+            fullscreenable: false,
+            skipTaskbar: true,
+            show: false,
+            webPreferences: {
+                nodeIntegration: false,
+                contextIsolation: true,
+                sandbox: true
+            }
+        });
+
+        this.securityPopover.on('blur', () => this.closeSecurityPopover());
+        this.securityPopover.on('closed', () => {
+            this.securityPopover = null;
+        });
+
+        this.securityPopover.loadURL(this.buildSecurityPopoverDataUrl(info)).catch(error => {
+            this.log('security-popover-error', { message: error.message });
+        });
+        this.securityPopover.once('ready-to-show', () => {
+            if (this.securityPopover && !this.securityPopover.isDestroyed()) {
+                this.securityPopover.show();
+            }
+        });
+    }
+
+    closeSecurityPopover() {
+        if (this.securityPopover && !this.securityPopover.isDestroyed()) {
+            this.securityPopover.close();
+        }
+        this.securityPopover = null;
+    }
+
+    sanitizeSecurityInfo(info) {
+        const safeInfo = info && typeof info === 'object' ? info : {};
+        const details = Array.isArray(safeInfo.details) ? safeInfo.details.slice(0, 8) : [];
+        return {
+            kicker: String(safeInfo.kicker || 'Connection').slice(0, 40),
+            title: String(safeInfo.title || 'Connection information').slice(0, 80),
+            summary: String(safeInfo.summary || 'No additional security information is available.').slice(0, 500),
+            details: details.map(entry => {
+                const label = Array.isArray(entry) ? entry[0] : '';
+                const value = Array.isArray(entry) ? entry[1] : '';
+                return [
+                    String(label || 'Detail').slice(0, 48),
+                    String(value || '').slice(0, 500)
+                ];
+            }).filter(([, value]) => value)
+        };
+    }
+
+    buildSecurityPopoverDataUrl(info) {
+        const rows = info.details.map(([label, value]) => `
+            <div class="row">
+                <div class="label">${this.escapeHtml(label)}</div>
+                <div class="value">${this.escapeHtml(value)}</div>
+            </div>
+        `).join('');
+
+        const html = `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+* { box-sizing: border-box; }
+body { margin: 0; background: #fff; color: #111827; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; overflow: hidden; }
+.card { border: 1px solid #d1d5db; border-radius: 8px; box-shadow: 0 12px 28px rgba(15, 23, 42, .22); height: 100vh; overflow: hidden; }
+.header { align-items: center; background: #f8fafc; border-bottom: 1px solid #e5e7eb; display: flex; justify-content: space-between; padding: 14px 16px; }
+.kicker { color: #64748b; font-size: 11px; font-weight: 800; margin-bottom: 3px; text-transform: uppercase; }
+.title { color: #111827; font-size: 17px; font-weight: 800; line-height: 1.2; max-width: 286px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.close { align-items: center; background: transparent; border: 0; border-radius: 4px; color: #6b7280; cursor: pointer; display: flex; font-size: 28px; height: 34px; justify-content: center; width: 34px; }
+.close:hover { background: #eef2f7; color: #374151; }
+.body { max-height: calc(100vh - 74px); overflow-y: auto; padding: 14px 16px; }
+.summary { color: #374151; font-size: 14px; line-height: 1.45; margin-bottom: 12px; }
+.row { border-top: 1px solid #eef2f7; padding: 10px 0 0; margin-top: 10px; }
+.label { color: #64748b; font-size: 11px; font-weight: 800; margin-bottom: 4px; text-transform: uppercase; }
+.value { color: #111827; font-size: 13px; line-height: 1.35; overflow-wrap: anywhere; user-select: text; }
+</style>
+</head>
+<body>
+<div class="card">
+    <div class="header">
+        <div>
+            <div class="kicker">${this.escapeHtml(info.kicker)}</div>
+            <div class="title">${this.escapeHtml(info.title)}</div>
+        </div>
+        <button class="close" onclick="window.close()" title="Close">×</button>
+    </div>
+    <div class="body">
+        <div class="summary">${this.escapeHtml(info.summary)}</div>
+        ${rows}
+    </div>
+</div>
+</body>
+</html>`;
+
+        return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
+    }
+
     showHnsProfilePopover(payload = {}) {
         if (!this.mainWindow || this.mainWindow.isDestroyed()) {
             return;
@@ -1647,9 +2234,9 @@ document.querySelectorAll('.row').forEach(row => {
         })[character]);
     }
 
-    sendStatusMessage(message, type = 'info') {
+    sendStatusMessage(message, type = 'info', action = null) {
         if (this.mainWindow && !this.mainWindow.isDestroyed()) {
-            this.mainWindow.webContents.send('show-status-message', { message, type });
+            this.mainWindow.webContents.send('show-status-message', { message, type, action });
         }
     }
 
@@ -2095,6 +2682,7 @@ document.querySelectorAll('.row').forEach(row => {
                 favicon: tab.favicon,
                 hostingProvider: tab.hostingProvider,
                 hnsProfile: tab.hnsProfile,
+                securityInfo: tab.securityInfo,
                 active: tab.id === this.activeTabId
             }));
         });
@@ -2151,6 +2739,16 @@ document.querySelectorAll('.row').forEach(row => {
             this.openLatestReleasePage();
         });
 
+        ipcMain.handle('show-security-popover', (event, payload) => {
+            this.requireTrustedIpcSender(event, 'show-security-popover');
+            this.showSecurityPopover(payload);
+        });
+
+        ipcMain.handle('hide-security-popover', (event) => {
+            this.requireTrustedIpcSender(event, 'hide-security-popover');
+            this.closeSecurityPopover();
+        });
+
         ipcMain.handle('show-hns-profile-popover', (event, payload) => {
             this.requireTrustedIpcSender(event, 'show-hns-profile-popover');
             this.showHnsProfilePopover(payload);
@@ -2169,6 +2767,11 @@ document.querySelectorAll('.row').forEach(row => {
         ipcMain.handle('set-browser-view-visible', (event, visible) => {
             this.requireTrustedIpcSender(event, 'set-browser-view-visible');
             this.setBrowserViewVisible(visible === true);
+        });
+
+        ipcMain.handle('set-status-bar-visible', (event, visible) => {
+            this.requireTrustedIpcSender(event, 'set-status-bar-visible');
+            this.setStatusBarVisible(visible === true);
         });
 
         ipcMain.handle('clear-cache-and-reload', async (event) => {

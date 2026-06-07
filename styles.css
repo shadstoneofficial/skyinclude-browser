@@ -197,9 +197,29 @@ body {
 }
 
 .security-indicator {
+    align-items: center;
+    background: transparent;
+    border: none;
+    border-radius: 50%;
     color: #34a853;
+    cursor: pointer;
+    display: flex;
+    flex-shrink: 0;
+    height: 24px;
+    justify-content: center;
     margin-right: 8px;
+    padding: 0;
     font-size: 14px;
+    width: 24px;
+}
+
+.security-indicator:hover {
+    background-color: #e8f0fe;
+}
+
+.security-indicator:focus-visible {
+    outline: 2px solid #1a73e8;
+    outline-offset: 2px;
 }
 
 .security-indicator.insecure {
@@ -212,6 +232,15 @@ body {
 
 .security-indicator.hosting-github {
     color: #24292f;
+}
+
+.security-indicator.hns-dane {
+    background-color: #e7f7ee;
+    color: #15803d;
+}
+
+.security-indicator.neutral {
+    color: #5f6368;
 }
 
 .hosting-indicator {
@@ -288,12 +317,20 @@ body {
 .status-bar {
     background-color: #fef7e0;
     border-top: 1px solid #f9c74f;
-    padding: 8px 16px;
+    gap: 12px;
+    height: 42px;
+    padding: 6px 16px;
     display: flex;
     align-items: center;
     justify-content: space-between;
     font-size: 12px;
     color: #b45309;
+    line-height: 1.2;
+}
+
+#status-text {
+    flex: 1;
+    min-width: 0;
 }
 
 .status-bar.error {
@@ -308,13 +345,36 @@ body {
     color: #1d4ed8;
 }
 
+.status-action {
+    background-color: #fff;
+    border: 1px solid currentColor;
+    border-radius: 6px;
+    color: inherit;
+    cursor: pointer;
+    flex-shrink: 0;
+    font: inherit;
+    font-weight: 700;
+    height: 28px;
+    line-height: 1;
+    margin-left: auto;
+    padding: 0 12px;
+}
+
+.status-action:hover {
+    background-color: rgba(255, 255, 255, 0.72);
+}
+
 .close-status {
     border: none;
     background: transparent;
     cursor: pointer;
+    flex-shrink: 0;
     font-size: 16px;
+    height: 28px;
     color: inherit;
-    margin-left: 16px;
+    line-height: 1;
+    margin-left: 0;
+    padding: 0 4px;
 }
 
 .hidden {
