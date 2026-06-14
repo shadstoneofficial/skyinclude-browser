@@ -552,7 +552,7 @@ class SkyIncludeBrowser {
             return defaultMs;
         }
 
-        return Math.min(configuredTimeout, defaultMs);
+        return Math.min(configuredTimeout, 30000);
     }
 
     getDaneLookupTimeout() {
@@ -1166,6 +1166,7 @@ class SkyIncludeBrowser {
             state: 'verified',
             timestamp: Date.now()
         });
+        this.rememberDaneVerifiedCertificate(check.domain, probe.certificate);
 
         if (this.tabs.get(tabId) !== tab || tab.id !== this.activeTabId || tab.loading) {
             return;

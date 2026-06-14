@@ -95,7 +95,7 @@ class HNSResolver {
 
         const configuredTimeout = Number(this.settingsManager.getSetting('hnsTimeout') || this.settings.timeout);
         const timeout = Number.isFinite(configuredTimeout) && configuredTimeout > 0
-            ? Math.min(configuredTimeout, this.settings.timeout)
+            ? Math.min(configuredTimeout, 30000)
             : this.settings.timeout;
 
         return {

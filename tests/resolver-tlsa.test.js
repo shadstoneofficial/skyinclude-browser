@@ -234,7 +234,7 @@ test('caches TLSA lookups briefly', async () => {
     assert.equal(first, second);
 });
 
-test('caps resolver timeout to the app default', () => {
+test('honors configured resolver timeout up to a sane maximum', () => {
     const resolver = new HNSResolver({
         getSetting(key) {
             if (key === 'hnsTimeout') return 15000;
@@ -243,5 +243,5 @@ test('caps resolver timeout to the app default', () => {
         }
     });
 
-    assert.equal(resolver.getResolverSettings().timeout, 4000);
+    assert.equal(resolver.getResolverSettings().timeout, 15000);
 });
