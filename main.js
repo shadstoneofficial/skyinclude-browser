@@ -10,6 +10,7 @@ const crypto = require('crypto');
 const SettingsManager = require('./settings.js');
 const { HNSResolver } = require('./resolver.js');
 const { inspectHnsHttpsCertificate } = require('./hns-tls.js');
+const { CATEGORY_META, sanitizeHnsProfile } = require('./profile-utils.js');
 
 let activeBrowser = null;
 const LATEST_RELEASE_URL = 'https://github.com/shadstoneofficial/skyinclude-browser/releases/latest';
@@ -2222,6 +2223,23 @@ body { margin: 0; background: #fff; color: #111827; font-family: -apple-system, 
             this.hnsProfilePopover = null;
         });
 
+        const allowedProfileUrls = new Set(profile.entries.map(entry => entry.url).filter(Boolean));
+        const openAllowedProfileUrl = navigationUrl => {
+            if (!allowedProfileUrls.has(navigationUrl)) return;
+            shell.openExternal(navigationUrl).catch(error => {
+                this.log('hns-profile-link-error', { url: navigationUrl, message: error.message });
+            });
+        };
+        this.hnsProfilePopover.webContents.on('will-navigate', (event, navigationUrl) => {
+            if (navigationUrl.startsWith('data:text/html')) return;
+            event.preventDefault();
+            openAllowedProfileUrl(navigationUrl);
+        });
+        this.hnsProfilePopover.webContents.setWindowOpenHandler(({ url }) => {
+            openAllowedProfileUrl(url);
+            return { action: 'deny' };
+        });
+
         this.hnsProfilePopover.loadURL(this.buildHnsProfilePopoverDataUrl(profile)).catch(error => {
             this.log('hns-profile-popover-error', { message: error.message });
         });
@@ -2240,30 +2258,32 @@ body { margin: 0; background: #fff; color: #111827; font-family: -apple-system, 
     }
 
     sanitizeHnsProfile(profile) {
-        if (!profile || !Array.isArray(profile.entries) || !profile.entries.length) {
-            return null;
-        }
-
-        const entries = profile.entries.slice(0, 16).map(entry => ({
-            label: String(entry.label || entry.key || 'Record').slice(0, 40),
-            value: String(entry.value || '').slice(0, 500)
-        })).filter(entry => entry.value);
-
-        return entries.length ? {
-            domain: String(profile.domain || 'HNS profile').slice(0, 120),
-            entries
-        } : null;
+        return sanitizeHnsProfile(profile);
     }
 
     buildHnsProfilePopoverDataUrl(profile) {
         const entriesJson = JSON.stringify(profile.entries).replace(/</g, '\\u003c');
-        const rows = profile.entries.map((entry, index) => `
-            <button class="row" type="button" data-index="${index}" title="Copy ${this.escapeHtml(entry.label)}">
-                <span class="label">${this.escapeHtml(entry.label)}</span>
-                <span class="value">${this.escapeHtml(entry.value)}</span>
-                <span class="copy-state">Copy</span>
-            </button>
-        `).join('');
+        const groups = Object.entries(CATEGORY_META).map(([category, meta]) => {
+            const rows = profile.entries.map((entry, index) => ({ entry, index }))
+                .filter(({ entry }) => entry.category === category)
+                .map(({ entry, index }) => `
+                    <div class="row">
+                        <span class="record-icon" aria-hidden="true">${meta.icon}</span>
+                        <div class="record-content">
+                            <span class="label">${this.escapeHtml(entry.label)}</span>
+                            <span class="value">${this.escapeHtml(entry.value)}</span>
+                        </div>
+                        ${entry.url ? `<a class="open" href="${this.escapeHtml(entry.url)}" target="_blank" rel="noopener noreferrer" title="Open ${this.escapeHtml(entry.label)}">Open</a>` : ''}
+                        <button class="copy" type="button" data-index="${index}" title="Copy ${this.escapeHtml(entry.label)}">Copy</button>
+                    </div>
+                `).join('');
+            return rows ? `
+                <section class="group">
+                    <h2><span aria-hidden="true">${meta.icon}</span> ${meta.label}</h2>
+                    ${rows}
+                </section>
+            ` : '';
+        }).join('');
 
         const html = `<!doctype html>
 <html>
@@ -2277,15 +2297,17 @@ body { margin: 0; background: #fff; color: #111827; font-family: -apple-system, 
 .domain { color: #111827; font-size: 20px; font-weight: 800; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
 .close { align-items: center; background: transparent; border: 0; border-radius: 4px; color: #6b7280; cursor: pointer; display: flex; font-size: 28px; height: 34px; justify-content: center; width: 34px; }
 .close:hover { background: #eef2f7; color: #374151; }
-.list { max-height: calc(100vh - 78px); overflow-y: auto; padding: 6px 0; }
-.row { background: #fff; border: 0; border-bottom: 1px solid #f3f4f6; color: inherit; cursor: pointer; display: block; font: inherit; padding: 11px 16px; position: relative; text-align: left; width: 100%; }
+.list { max-height: calc(100vh - 64px); overflow-y: auto; padding: 8px 0 12px; }
+.group h2 { align-items: center; color: #64748b; display: flex; font-size: 11px; gap: 6px; letter-spacing: .06em; margin: 10px 16px 5px; text-transform: uppercase; }
+.row { align-items: center; background: #fff; border-bottom: 1px solid #f3f4f6; color: inherit; display: flex; gap: 10px; min-height: 58px; padding: 9px 14px; }
 .row:hover { background: #f8fafc; }
-.row:last-child { border-bottom: 0; }
-.label { color: #64748b; display: block; font-size: 12px; font-weight: 800; margin-bottom: 6px; text-transform: uppercase; }
-.value { color: #111827; display: block; font-size: 15px; line-height: 1.35; overflow-wrap: anywhere; padding-right: 44px; user-select: text; }
-.copy-state { color: #15803d; font-size: 11px; font-weight: 800; opacity: 0; position: absolute; right: 16px; top: 14px; transition: opacity .15s ease; }
-.row:hover .copy-state, .row.copied .copy-state { opacity: 1; }
-.row.copied .copy-state { color: #166534; }
+.record-icon { align-items: center; background: #e7f7ee; border-radius: 50%; color: #15803d; display: flex; flex: 0 0 28px; font-size: 14px; height: 28px; justify-content: center; }
+.record-content { flex: 1; min-width: 0; }
+.label { color: #64748b; display: block; font-size: 11px; font-weight: 800; margin-bottom: 3px; text-transform: uppercase; }
+.value { color: #111827; display: block; font-size: 13px; line-height: 1.35; overflow: hidden; overflow-wrap: anywhere; user-select: text; }
+.copy, .open { background: #fff; border: 1px solid #d1d5db; border-radius: 999px; color: #374151; cursor: pointer; flex: 0 0 auto; font-family: inherit; font-size: 11px; font-weight: 700; padding: 5px 8px; text-decoration: none; }
+.copy:hover, .open:hover { background: #eef2f7; }
+.copy.copied { background: #e7f7ee; border-color: #86efac; color: #166534; }
 </style>
 </head>
 <body>
@@ -2294,7 +2316,7 @@ body { margin: 0; background: #fff; color: #111827; font-family: -apple-system, 
         <div class="domain">${this.escapeHtml(profile.domain)}</div>
         <button class="close" onclick="window.close()" title="Close">×</button>
     </div>
-    <div class="list">${rows}</div>
+    <div class="list">${groups}</div>
 </div>
 <script>
 const entries = ${entriesJson};
@@ -2310,30 +2332,28 @@ function fallbackCopy(text) {
     textarea.remove();
     return copied;
 }
-async function copyValue(row, value) {
+async function copyValue(button, value) {
     try {
         if (navigator.clipboard && navigator.clipboard.writeText) {
             await navigator.clipboard.writeText(value);
         } else if (!fallbackCopy(value)) {
             throw new Error('copy failed');
         }
-        const state = row.querySelector('.copy-state');
-        row.classList.add('copied');
-        if (state) state.textContent = 'Copied';
+        button.classList.add('copied');
+        button.textContent = 'Copied';
         setTimeout(() => {
-            row.classList.remove('copied');
-            if (state) state.textContent = 'Copy';
+            button.classList.remove('copied');
+            button.textContent = 'Copy';
         }, 1400);
     } catch (error) {
-        const state = row.querySelector('.copy-state');
-        if (state) state.textContent = 'Select';
+        button.textContent = 'Select';
     }
 }
-document.querySelectorAll('.row').forEach(row => {
-    row.addEventListener('click', () => {
-        const entry = entries[Number(row.dataset.index)];
+document.querySelectorAll('.copy').forEach(button => {
+    button.addEventListener('click', () => {
+        const entry = entries[Number(button.dataset.index)];
         if (entry && entry.value) {
-            copyValue(row, entry.value);
+            copyValue(button, entry.value);
         }
     });
 });
