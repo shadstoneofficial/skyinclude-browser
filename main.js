@@ -2186,7 +2186,7 @@ body { margin: 0; background: #fff; color: #111827; font-family: -apple-system, 
 
         const anchor = payload.anchor && typeof payload.anchor === 'object' ? payload.anchor : {};
         const parentBounds = this.mainWindow.getBounds();
-        const width = 340;
+        const width = 360;
         const height = Math.min(520, 110 + profile.entries.length * 70);
         const x = Math.min(
             Math.max(parentBounds.x + 12, parentBounds.x + Math.round(Number(anchor.left) || 0) - 24),
@@ -2273,14 +2273,19 @@ body { margin: 0; background: #fff; color: #111827; font-family: -apple-system, 
                             <span class="label">${this.escapeHtml(entry.label)}</span>
                             <span class="value">${this.escapeHtml(entry.value)}</span>
                         </div>
-                        ${entry.url ? `<a class="open" href="${this.escapeHtml(entry.url)}" target="_blank" rel="noopener noreferrer" title="Open ${this.escapeHtml(entry.label)}">Open</a>` : ''}
-                        <button class="copy" type="button" data-index="${index}" title="Copy ${this.escapeHtml(entry.label)}">Copy</button>
+                        <div class="actions">
+                            ${entry.url ? `<a class="open" href="${this.escapeHtml(entry.url)}" target="_blank" rel="noopener noreferrer" title="Open ${this.escapeHtml(entry.label)}">Open</a>` : ''}
+                            <button class="copy" type="button" data-index="${index}" title="Copy ${this.escapeHtml(entry.label)}">Copy</button>
+                        </div>
                     </div>
                 `).join('');
             return rows ? `
-                <section class="group">
-                    <h2><span aria-hidden="true">${meta.icon}</span> ${meta.label}</h2>
-                    ${rows}
+                <section class="group group-${category}">
+                    <h2>
+                        <span>${meta.label}</span>
+                        <span class="group-count">${profile.entries.filter(entry => entry.category === category).length}</span>
+                    </h2>
+                    <div class="group-rows">${rows}</div>
                 </section>
             ` : '';
         }).join('');
@@ -2291,29 +2296,50 @@ body { margin: 0; background: #fff; color: #111827; font-family: -apple-system, 
 <meta charset="utf-8">
 <style>
 * { box-sizing: border-box; }
-body { margin: 0; background: #fff; color: #111827; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; overflow: hidden; }
-.card { border: 1px solid #d1d5db; border-radius: 8px; box-shadow: 0 12px 28px rgba(15, 23, 42, .22); height: 100vh; overflow: hidden; }
-.header { align-items: center; background: #f8fafc; border-bottom: 1px solid #e5e7eb; display: flex; justify-content: space-between; padding: 14px 16px; }
-.domain { color: #111827; font-size: 20px; font-weight: 800; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
-.close { align-items: center; background: transparent; border: 0; border-radius: 4px; color: #6b7280; cursor: pointer; display: flex; font-size: 28px; height: 34px; justify-content: center; width: 34px; }
-.close:hover { background: #eef2f7; color: #374151; }
-.list { max-height: calc(100vh - 64px); overflow-y: auto; padding: 8px 0 12px; }
-.group h2 { align-items: center; color: #64748b; display: flex; font-size: 11px; gap: 6px; letter-spacing: .06em; margin: 10px 16px 5px; text-transform: uppercase; }
-.row { align-items: center; background: #fff; border-bottom: 1px solid #f3f4f6; color: inherit; display: flex; gap: 10px; min-height: 58px; padding: 9px 14px; }
+body { margin: 0; background: transparent; color: #111827; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; overflow: hidden; }
+button, a { -webkit-tap-highlight-color: transparent; }
+.card { background: #fff; border: 1px solid rgba(15, 23, 42, .12); border-radius: 12px; box-shadow: 0 16px 36px rgba(15, 23, 42, .20), 0 3px 10px rgba(15, 23, 42, .08); height: 100vh; overflow: hidden; }
+.header { align-items: center; background: linear-gradient(135deg, #f8fafc 0%, #f0fdf4 100%); border-bottom: 1px solid #e5e7eb; display: flex; gap: 12px; padding: 14px; }
+.profile-mark { align-items: center; background: #15803d; border: 3px solid rgba(255, 255, 255, .9); border-radius: 50%; box-shadow: 0 2px 7px rgba(21, 128, 61, .22); color: #fff; display: flex; flex: 0 0 42px; font-size: 11px; font-weight: 900; height: 42px; justify-content: center; letter-spacing: .04em; }
+.profile-meta { flex: 1; min-width: 0; }
+.kicker { color: #15803d; font-size: 10px; font-weight: 800; letter-spacing: .07em; margin-bottom: 3px; text-transform: uppercase; }
+.domain { color: #111827; font-size: 16px; font-weight: 750; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.record-summary { color: #64748b; font-size: 11px; margin-top: 3px; }
+.close { align-items: center; background: transparent; border: 0; border-radius: 7px; color: #94a3b8; cursor: pointer; display: flex; flex: 0 0 30px; font-family: inherit; font-size: 22px; height: 30px; justify-content: center; line-height: 1; padding: 0; }
+.close:hover { background: rgba(15, 23, 42, .06); color: #334155; }
+.list { max-height: calc(100vh - 91px); overflow-y: auto; padding: 10px 12px 14px; scrollbar-color: #cbd5e1 transparent; scrollbar-width: thin; }
+.group { margin-top: 11px; }
+.group:first-child { margin-top: 0; }
+.group h2 { align-items: center; color: #64748b; display: flex; font-size: 10px; font-weight: 800; justify-content: space-between; letter-spacing: .07em; margin: 0 2px 7px; text-transform: uppercase; }
+.group-count { align-items: center; background: #f1f5f9; border-radius: 999px; color: #64748b; display: inline-flex; font-size: 9px; height: 17px; justify-content: center; letter-spacing: 0; min-width: 17px; padding: 0 5px; }
+.group-rows { border: 1px solid #e5e7eb; border-radius: 10px; overflow: hidden; }
+.row { align-items: center; background: #fff; border-bottom: 1px solid #eef2f7; color: inherit; display: flex; gap: 10px; min-height: 56px; padding: 9px 10px; transition: background .12s ease; }
+.row:last-child { border-bottom: 0; }
 .row:hover { background: #f8fafc; }
-.record-icon { align-items: center; background: #e7f7ee; border-radius: 50%; color: #15803d; display: flex; flex: 0 0 28px; font-size: 14px; height: 28px; justify-content: center; }
+.record-icon { align-items: center; background: #e8f7ee; border: 1px solid #d1fae5; border-radius: 50%; color: #15803d; display: flex; flex: 0 0 30px; font-size: 14px; height: 30px; justify-content: center; }
+.group-wallet .record-icon { background: #fff7ed; border-color: #fed7aa; color: #c2410c; }
+.group-agent .record-icon { background: #eff6ff; border-color: #bfdbfe; color: #1d4ed8; }
+.group-other .record-icon { background: #f8fafc; border-color: #e2e8f0; color: #64748b; }
 .record-content { flex: 1; min-width: 0; }
-.label { color: #64748b; display: block; font-size: 11px; font-weight: 800; margin-bottom: 3px; text-transform: uppercase; }
-.value { color: #111827; display: block; font-size: 13px; line-height: 1.35; overflow: hidden; overflow-wrap: anywhere; user-select: text; }
-.copy, .open { background: #fff; border: 1px solid #d1d5db; border-radius: 999px; color: #374151; cursor: pointer; flex: 0 0 auto; font-family: inherit; font-size: 11px; font-weight: 700; padding: 5px 8px; text-decoration: none; }
-.copy:hover, .open:hover { background: #eef2f7; }
+.label { color: #64748b; display: block; font-size: 10px; font-weight: 800; letter-spacing: .025em; margin-bottom: 3px; text-transform: uppercase; }
+.value { color: #1e293b; display: block; font-size: 12px; line-height: 1.35; overflow: hidden; overflow-wrap: anywhere; user-select: text; }
+.actions { align-items: center; display: flex; flex: 0 0 auto; gap: 5px; }
+.copy, .open { align-items: center; background: #fff; border: 1px solid #d1d5db; border-radius: 999px; color: #475569; cursor: pointer; display: inline-flex; font-family: inherit; font-size: 10px; font-weight: 750; justify-content: center; min-height: 26px; padding: 4px 8px; text-decoration: none; transition: background .12s ease, border-color .12s ease, color .12s ease; }
+.copy:hover, .open:hover { background: #f1f5f9; border-color: #94a3b8; color: #0f172a; }
+.open { border-color: #bbf7d0; color: #15803d; }
+.open:hover { background: #f0fdf4; border-color: #86efac; color: #166534; }
 .copy.copied { background: #e7f7ee; border-color: #86efac; color: #166534; }
 </style>
 </head>
 <body>
 <div class="card">
     <div class="header">
-        <div class="domain">${this.escapeHtml(profile.domain)}</div>
+        <div class="profile-mark" aria-hidden="true">HNS</div>
+        <div class="profile-meta">
+            <div class="kicker">Handshake profile</div>
+            <div class="domain">${this.escapeHtml(profile.domain)}</div>
+            <div class="record-summary">${profile.entries.length} published record${profile.entries.length === 1 ? '' : 's'}</div>
+        </div>
         <button class="close" onclick="window.close()" title="Close">×</button>
     </div>
     <div class="list">${groups}</div>
