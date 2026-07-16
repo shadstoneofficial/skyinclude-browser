@@ -11,7 +11,7 @@ It resolves HNS names with DNS-over-HTTPS, supports HeadlessDomains agent/chatbo
 - Preserve native HNS hostnames in the address bar, including inner paths
 - Resolve `.agent` and `.chatbot` names through HeadlessDomains manifests
 - Open new-window links as managed browser tabs
-- Local settings UI for resolver and privacy options
+- Local settings UI for ordered binary-DoH and DNS-JSON resolvers, health testing, and privacy options
 
 ## Development
 

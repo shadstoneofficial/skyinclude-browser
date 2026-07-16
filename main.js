@@ -1056,6 +1056,12 @@ class SkyIncludeBrowser {
 
         return {
             source: resolution.source || 'unknown',
+            resolverId: resolution.resolver?.id || null,
+            resolverTransport: resolution.resolver?.transport || null,
+            resolverFallbackCount: resolution.resolverFallbackCount || 0,
+            resolverAttempts: Array.isArray(resolution.resolverAttempts)
+                ? resolution.resolverAttempts
+                : [],
             route,
             addressType: resolution.addressType || null,
             recordCounts: counts,
@@ -2872,6 +2878,33 @@ document.querySelectorAll('.copy').forEach(button => {
             // Reinitialize resolver with new settings
             this.hnsResolver = new HNSResolver(this.settingsManager);
             return result;
+        });
+
+        ipcMain.handle('test-hns-resolution', async (event, domain) => {
+            this.requireTrustedIpcSender(event, 'test-hns-resolution');
+            if (typeof domain !== 'string' || domain.length > 253) {
+                throw new Error('Enter a valid HNS domain');
+            }
+
+            const cleanDomain = this.hnsResolver.normalizeDomain(domain);
+            if (!this.hnsResolver.isValidDnsName(cleanDomain)) {
+                throw new Error('Enter a valid HNS domain');
+            }
+
+            const response = await this.hnsResolver.queryRecordSet(
+                cleanDomain,
+                ['A', 'AAAA', 'CNAME', 'TXT']
+            );
+            return {
+                domain: cleanDomain,
+                status: response.rcodeName,
+                resolver: this.hnsResolver.getPublicResolverInfo(response.resolver),
+                fallbackCount: response.fallbackCount,
+                elapsedMs: response.elapsedMs,
+                attempts: response.attempts,
+                recordCounts: Object.fromEntries(Object.entries(response.records)
+                    .map(([type, records]) => [type, records.length]))
+            };
         });
         
         ipcMain.handle('update-setting', (event, key, value) => {

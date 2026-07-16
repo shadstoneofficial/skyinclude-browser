@@ -248,20 +248,20 @@
 
                 <div class="setting-group">
                     <label class="setting-label">Custom Resolver Endpoint</label>
-                    <p class="setting-description">Add a custom HNS resolver (optional, used first if specified)</p>
-                    <input type="text" id="hnsCustomResolver" class="form-control" placeholder="e.g., custom.hnsdoh.com or 8.8.8.8">
+                    <p class="setting-description">Optional first resolver. Use an HTTPS endpoint, optionally prefixed with <code>doh-wire</code> or <code>dns-json</code>. Resolver operators can observe requested names.</p>
+                    <input type="text" id="hnsCustomResolver" class="form-control" placeholder="e.g., dns-json https://api.web3dns.net/">
                 </div>
 
                 <div class="setting-group">
-                    <label class="setting-label">Default Resolver Endpoints</label>
-                    <p class="setting-description">Built-in HNS resolvers (one per line)</p>
+                    <label class="setting-label">Ordered Resolver Endpoints</label>
+                    <p class="setting-description">One per line in priority order: <code>doh-wire URL</code> or <code>dns-json URL</code>. A legacy URL alone is treated as binary DoH. Native DNS IPs are not accepted.</p>
                     <textarea id="hnsResolvers" class="form-control resolver-list" rows="4"></textarea>
                 </div>
 
                 <div class="setting-group">
                     <label class="setting-label">Resolution Timeout (ms)</label>
                     <p class="setting-description">Maximum time to wait for HNS resolution</p>
-                    <input type="number" id="hnsTimeout" class="form-control" min="5000" max="60000" step="1000">
+                    <input type="number" id="hnsTimeout" class="form-control" min="1000" max="30000" step="1000">
                 </div>
 
                 <div class="resolver-test">
@@ -364,13 +364,39 @@
         function populateSettings(settings) {
             document.getElementById('hnsResolutionMode').value = settings.hnsResolutionMode || 'doh';
             document.getElementById('hnsCustomResolver').value = settings.hnsCustomResolver || '';
-            document.getElementById('hnsResolvers').value = (settings.hnsResolvers || []).join('\n');
-            document.getElementById('hnsTimeout').value = settings.hnsTimeout || 15000;
+            document.getElementById('hnsResolvers').value = (settings.hnsResolvers || [])
+                .map(formatResolverSetting)
+                .filter(Boolean)
+                .join('\n');
+            document.getElementById('hnsTimeout').value = settings.hnsTimeout || 4000;
             document.getElementById('blockTrackers').checked = settings.blockTrackers !== false;
             document.getElementById('doNotTrack').checked = settings.doNotTrack !== false;
             document.getElementById('hnsFallbackToDNS').checked = settings.hnsFallbackToDNS !== false;
             document.getElementById('homepage').value = settings.homepage || 'skyinclude://home';
             document.getElementById('searchEngine').value = settings.searchEngine || 'https://duckduckgo.com/?q=%s';
+        }
+
+        function formatResolverSetting(resolver) {
+            if (typeof resolver === 'string') {
+                return resolver;
+            }
+            if (!resolver || typeof resolver !== 'object' || !resolver.url) {
+                return '';
+            }
+            return `${resolver.transport || 'doh-wire'} ${resolver.url}`;
+        }
+
+        function parseResolverSetting(value) {
+            const line = value.trim();
+            const match = line.match(/^(doh-wire|dns-json)\s+(.+)$/i);
+            if (!match) {
+                return line;
+            }
+            return {
+                transport: match[1].toLowerCase(),
+                url: match[2].trim(),
+                enabled: true
+            };
         }
 
         // Save settings
@@ -386,7 +412,8 @@
                     hnsResolvers: document.getElementById('hnsResolvers').value
                         .split('\n')
                         .map(r => r.trim())
-                        .filter(r => r.length > 0),
+                        .filter(r => r.length > 0)
+                        .map(parseResolverSetting),
                     hnsTimeout: parseInt(document.getElementById('hnsTimeout').value),
                     blockTrackers: document.getElementById('blockTrackers').checked,
                     doNotTrack: document.getElementById('doNotTrack').checked,
@@ -442,8 +469,23 @@
             document.getElementById('testResolver').disabled = true;
             
             try {
-                // This would need to be implemented in the main process
-                showTestResult(`Testing ${domain}... (Test feature coming soon)`, 'success');
+                const result = await window.electronAPI.testHnsResolution(domain);
+                const resolver = result.resolver
+                    ? `${result.resolver.name} (${result.resolver.transport})`
+                    : 'unknown resolver';
+                const counts = Object.entries(result.recordCounts || {})
+                    .map(([type, count]) => `${type}: ${count}`)
+                    .join(', ');
+                const fallback = result.fallbackCount
+                    ? ` after ${result.fallbackCount} fallback${result.fallbackCount === 1 ? '' : 's'}`
+                    : '';
+                const attempts = (result.attempts || [])
+                    .map(attempt => `${attempt.resolver?.name || 'resolver'}: ${attempt.status} (${attempt.elapsedMs} ms)`)
+                    .join(' → ');
+                showTestResult(
+                    `${result.domain}: ${result.status} via ${resolver}${fallback} in ${result.elapsedMs} ms. ${counts}${attempts ? `. Attempts: ${attempts}` : ''}`,
+                    result.status === 'NOERROR' ? 'success' : 'error'
+                );
             } catch (error) {
                 showTestResult(`Test failed: ${error.message}`, 'error');
             } finally {

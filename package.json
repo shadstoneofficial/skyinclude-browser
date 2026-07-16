@@ -1,6 +1,6 @@
 {
   "name": "skyinclude-browser",
-  "version": "0.1.19",
+  "version": "0.1.20",
   "description": "Electron browser with native Handshake (HNS) domain resolution",
   "main": "main.js",
   "scripts": {
@@ -17,7 +17,7 @@
     "dist-win": "electron-builder --win --publish=never",
     "dist-linux": "electron-builder --linux --publish=never",
     "pack": "electron-builder --dir",
-    "check": "node --check main.js && node --check preload.js && node --check renderer.js && node --check resolver.js && node --check settings.js && node --check history.js && node --check hns-tls.js && node --check profile-utils.js",
+    "check": "node --check main.js && node --check preload.js && node --check renderer.js && node --check resolver.js && node --check resolver-config.js && node --check settings.js && node --check history.js && node --check hns-tls.js && node --check profile-utils.js",
     "test": "npm run check && node --test tests/*.test.js"
   },
   "keywords": [
@@ -45,6 +45,7 @@
       "preload.js",
       "renderer.js",
       "resolver.js",
+      "resolver-config.js",
       "hns-tls.js",
       "profile-utils.js",
       "history.js",

@@ -54,6 +54,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getSettings: () => ipcRenderer.invoke('get-settings'),
     saveSettings: (settings) => ipcRenderer.invoke('save-settings', settings),
     updateSetting: (key, value) => ipcRenderer.invoke('update-setting', key, value),
+    testHnsResolution: (domain) => ipcRenderer.invoke('test-hns-resolution', domain),
 
     // App info
     getAppInfo: () => ipcRenderer.invoke('get-app-info'),

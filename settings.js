@@ -1,6 +1,13 @@
 const fs = require('fs');
 const path = require('path');
 const { app } = require('electron');
+const {
+    BUILT_IN_RESOLVERS,
+    normalizeResolverDescriptor,
+    normalizeResolverList
+} = require('./resolver-config.js');
+
+const HNS_RESOLVER_DEFAULTS_VERSION = 2;
 
 class SettingsManager {
     constructor() {
@@ -8,9 +15,8 @@ class SettingsManager {
         this.defaultSettings = {
             // HNS Resolution
             hnsResolutionMode: 'doh', // 'doh' (DNS-over-HTTPS) or 'p2p' (Light Client)
-            hnsResolvers: [
-                'https://hnsdoh.com/dns-query'
-            ],
+            hnsResolvers: normalizeResolverList(BUILT_IN_RESOLVERS),
+            hnsResolverDefaultsVersion: HNS_RESOLVER_DEFAULTS_VERSION,
             hnsCustomResolver: '',
             hnsTimeout: 4000,
             hnsDANE: false,
@@ -73,17 +79,44 @@ class SettingsManager {
                 
                 // Merge with defaults to ensure all settings exist
                 this.settings = { ...this.defaultSettings, ...savedSettings };
+                if (!Object.prototype.hasOwnProperty.call(savedSettings, 'hnsResolverDefaultsVersion')) {
+                    this.settings.hnsResolverDefaultsVersion = 0;
+                }
+                const migrated = this.migrateHnsResolverSettings();
+                if (migrated) {
+                    this.saveSettings();
+                }
                 
                 console.log('Settings loaded successfully');
             } else {
                 console.log('No existing settings file, using defaults');
                 this.settings = { ...this.defaultSettings };
+                this.migrateHnsResolverSettings();
                 this.saveSettings();
             }
         } catch (error) {
             console.error('Failed to load settings:', error);
             this.settings = { ...this.defaultSettings };
         }
+    }
+
+    migrateHnsResolverSettings() {
+        const before = JSON.stringify({
+            resolvers: this.settings.hnsResolvers || [],
+            version: this.settings.hnsResolverDefaultsVersion
+        });
+        const normalized = normalizeResolverList(this.settings.hnsResolvers || []);
+        const currentVersion = Number(this.settings.hnsResolverDefaultsVersion) || 0;
+        const isLegacyDefault = normalized.length === 1 && normalized[0].id === 'hnsdoh';
+        this.settings.hnsResolvers = currentVersion < HNS_RESOLVER_DEFAULTS_VERSION
+            && isLegacyDefault
+            ? normalizeResolverList([...normalized, BUILT_IN_RESOLVERS[1]])
+            : normalized;
+        this.settings.hnsResolverDefaultsVersion = HNS_RESOLVER_DEFAULTS_VERSION;
+        return before !== JSON.stringify({
+            resolvers: this.settings.hnsResolvers,
+            version: this.settings.hnsResolverDefaultsVersion
+        });
     }
 
     saveSettings() {
@@ -198,14 +231,15 @@ class SettingsManager {
         }
 
         if (typeof settings.hnsCustomResolver === 'string') {
-            validated.hnsCustomResolver = settings.hnsCustomResolver.trim();
+            const customResolver = settings.hnsCustomResolver.trim();
+            if (!customResolver || normalizeResolverDescriptor(customResolver)) {
+                validated.hnsCustomResolver = customResolver;
+            }
         }
         
         // Validate array settings
         if (Array.isArray(settings.hnsResolvers)) {
-            validated.hnsResolvers = settings.hnsResolvers.filter(url => 
-                typeof url === 'string' && url.trim()
-            );
+            validated.hnsResolvers = normalizeResolverList(settings.hnsResolvers);
         }
         
         return validated;
@@ -263,8 +297,8 @@ class SettingsManager {
         // Notify other parts of the application about settings changes
         // This could be expanded to emit events or update other components
         
-        if (changedSettings.hnsResolutionMode || changedSettings.hnsResolvers || 
-            changedSettings.hnsTimeout || changedSettings.hnsDANE) {
+        if (changedSettings.hnsResolutionMode || changedSettings.hnsResolvers ||
+            changedSettings.hnsCustomResolver !== undefined || changedSettings.hnsTimeout || changedSettings.hnsDANE) {
             this.updateHNSResolver();
         }
         
@@ -311,6 +345,7 @@ class SettingsManager {
         return {
             hnsResolutionMode: this.settings.hnsResolutionMode,
             hnsResolvers: this.settings.hnsResolvers,
+            hnsCustomResolver: this.settings.hnsCustomResolver,
             hnsTimeout: this.settings.hnsTimeout,
             hnsDANE: this.settings.hnsDANE,
             hnsFallbackToDNS: this.settings.hnsFallbackToDNS

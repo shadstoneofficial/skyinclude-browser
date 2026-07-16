@@ -2,7 +2,14 @@ const https = require('https');
 const http = require('http');
 const dns = require('dns').promises;
 const crypto = require('crypto');
+const net = require('net');
 const { URL } = require('url');
+const {
+    BUILT_IN_RESOLVERS,
+    normalizeResolverDescriptor,
+    normalizeResolverList,
+    normalizeResolverUrl
+} = require('./resolver-config.js');
 
 const DNS_TYPES = {
     A: 1,
@@ -18,10 +25,14 @@ const SUPPORTED_TLSA = {
     matchingType: 1
 };
 
-const FALLBACK_DOH_RESOLVERS = [
-    'https://hnsdoh.com/dns-query',
-    'https://query.hdns.io/dns-query'
-];
+const DNS_RCODE_NAMES = {
+    0: 'NOERROR',
+    1: 'FORMERR',
+    2: 'SERVFAIL',
+    3: 'NXDOMAIN',
+    4: 'NOTIMP',
+    5: 'REFUSED'
+};
 
 const HNS_BIO_PREFIXES = new Set([
     'pfp', 'bgcolor', 'bg', 'mail', 'tel', 'tb', 'sx', 'matrix', 'sn',
@@ -72,7 +83,8 @@ class HNSResolver {
         this.settingsManager = settingsManager;
         this.settings = {
             resolutionMode: 'doh',
-            dohResolver: 'https://hnsdoh.com/dns-query',
+            resolvers: BUILT_IN_RESOLVERS,
+            dohResolver: BUILT_IN_RESOLVERS[0].url,
             headlessLookupBase: 'https://headlessdomains.com/api/v1/lookup/',
             timeout: 4000,
             enableDANE: false
@@ -82,16 +94,26 @@ class HNSResolver {
         this.cacheTimeout = 300000;
         this.tlsaCache = new Map();
         this.tlsaCacheTimeout = 300000;
+        this.resolverHealth = new Map();
+        this.resolverDiagnostics = [];
+        this.maxResolverDiagnostics = 100;
+        this.resolverCooldownMs = 30000;
     }
 
     getResolverSettings() {
         if (!this.settingsManager) {
-            return { ...this.settings };
+            return {
+                ...this.settings,
+                resolvers: normalizeResolverList(this.settings.resolvers)
+            };
         }
 
-        const resolvers = this.settingsManager.getSetting('hnsResolvers') || [];
+        const resolvers = normalizeResolverList(this.settingsManager.getSetting('hnsResolvers') || []);
         const customResolver = this.settingsManager.getSetting('hnsCustomResolver');
-        const dohResolver = customResolver || resolvers.find(resolver => String(resolver || '').includes('/dns-query'));
+        const candidates = normalizeResolverList([
+            customResolver,
+            ...resolvers
+        ]);
 
         const configuredTimeout = Number(this.settingsManager.getSetting('hnsTimeout') || this.settings.timeout);
         const timeout = Number.isFinite(configuredTimeout) && configuredTimeout > 0
@@ -100,7 +122,8 @@ class HNSResolver {
 
         return {
             resolutionMode: this.settingsManager.getSetting('hnsResolutionMode') || 'doh',
-            dohResolver: dohResolver || this.settings.dohResolver,
+            resolvers: candidates.length ? candidates : normalizeResolverList(this.settings.resolvers),
+            dohResolver: candidates.find(resolver => resolver.transport === 'doh-wire')?.url || this.settings.dohResolver,
             headlessLookupBase: this.settings.headlessLookupBase,
             timeout,
             enableDANE: this.settingsManager.getSetting('hnsDANE') === true
@@ -108,50 +131,91 @@ class HNSResolver {
     }
 
     normalizeDohResolver(resolverUrl) {
-        const value = String(resolverUrl || '').trim();
-        if (!value) {
-            return null;
-        }
+        return normalizeResolverUrl(String(resolverUrl || '').replace(/^doh-wire\s+/i, '').trim(), 'doh-wire');
+    }
 
-        const withScheme = value.startsWith('http://') || value.startsWith('https://')
-            ? value
-            : `https://${value}`;
+    getConfiguredResolverCandidates(options = {}) {
+        const settings = this.getResolverSettings();
+        return normalizeResolverList([
+            options.resolver,
+            options.dohResolver,
+            ...settings.resolvers
+        ]);
+    }
 
-        try {
-            const url = new URL(withScheme);
-            if (!url.pathname || url.pathname === '/') {
-                url.pathname = '/dns-query';
+    getResolverCandidateState(options = {}) {
+        const candidates = this.getConfiguredResolverCandidates(options);
+        const now = Date.now();
+        const available = [];
+        const cooling = [];
+        candidates.forEach((resolver, configuredIndex) => {
+            const health = this.resolverHealth.get(this.getResolverKey(resolver));
+            if (health && health.retryAt > now) {
+                cooling.push({ resolver, configuredIndex, retryAt: health.retryAt });
+            } else {
+                available.push({ resolver, configuredIndex });
             }
-            return url.toString();
-        } catch (error) {
-            return null;
-        }
+        });
+        return { candidates, available, cooling };
+    }
+
+    getResolverCandidates(options = {}) {
+        return this.getResolverCandidateState(options).available.map(candidate => candidate.resolver);
     }
 
     getDohResolverCandidates(options = {}) {
-        const settings = this.getResolverSettings();
-        const resolvers = this.settingsManager?.getSetting('hnsResolvers') || [];
-        const customResolver = this.settingsManager?.getSetting('hnsCustomResolver');
-        const candidates = [
-            options.dohResolver,
-            customResolver,
-            settings.dohResolver,
-            ...resolvers,
-            ...FALLBACK_DOH_RESOLVERS
-        ];
-        const seen = new Set();
+        return this.getResolverCandidates(options)
+            .filter(resolver => resolver.transport === 'doh-wire')
+            .map(resolver => resolver.url);
+    }
 
-        return candidates
-            .map(resolver => this.normalizeDohResolver(resolver))
-            .filter(Boolean)
-            .filter(resolver => {
-                const key = resolver.toLowerCase();
-                if (seen.has(key)) {
-                    return false;
-                }
-                seen.add(key);
-                return true;
-            });
+    getResolverKey(resolver) {
+        return `${resolver.transport}|${resolver.url}`.toLowerCase();
+    }
+
+    getPublicResolverInfo(resolver) {
+        return resolver ? {
+            id: resolver.id,
+            name: resolver.name,
+            transport: resolver.transport,
+            url: resolver.url
+        } : null;
+    }
+
+    recordResolverDiagnostic(event) {
+        this.resolverDiagnostics.push({
+            timestamp: new Date().toISOString(),
+            ...event
+        });
+        if (this.resolverDiagnostics.length > this.maxResolverDiagnostics) {
+            this.resolverDiagnostics.splice(0, this.resolverDiagnostics.length - this.maxResolverDiagnostics);
+        }
+    }
+
+    markResolverFailure(resolver, error, elapsedMs) {
+        const key = this.getResolverKey(resolver);
+        this.resolverHealth.set(key, {
+            retryAt: Date.now() + this.resolverCooldownMs,
+            error: error.message
+        });
+        this.recordResolverDiagnostic({
+            event: 'failure',
+            resolver: this.getPublicResolverInfo(resolver),
+            elapsedMs,
+            status: error.rcodeName || error.code || 'ERROR',
+            message: error.message
+        });
+    }
+
+    markResolverSuccess(resolver, elapsedMs, rcodeName, fallbackCount) {
+        this.resolverHealth.delete(this.getResolverKey(resolver));
+        this.recordResolverDiagnostic({
+            event: 'success',
+            resolver: this.getPublicResolverInfo(resolver),
+            elapsedMs,
+            status: rcodeName,
+            fallbackCount
+        });
     }
 
     async resolveHNSDomain(domain) {
@@ -202,9 +266,15 @@ class HNSResolver {
         const attempts = 5;
 
         for (let attempt = 1; attempt <= attempts; attempt += 1) {
-            const result = await this.resolveWebRecordsOnly(domain);
-            if (result) {
-                return result;
+            try {
+                const result = await this.resolveWebRecordsOnly(domain);
+                if (result) {
+                    return result;
+                }
+            } catch (error) {
+                if (error.code === 'RESOLVER_COOLDOWN') {
+                    return null;
+                }
             }
 
             if (attempt < attempts) {
@@ -216,17 +286,15 @@ class HNSResolver {
     }
 
     async resolveWebRecordsOnly(domain) {
-        const settings = this.getResolverSettings();
-        const [cnameRecords, aRecords, aaaaRecords, hnsProfile] = await Promise.all([
-            this.queryDoh(settings.dohResolver, domain, 'CNAME', settings.timeout).catch(() => []),
-            this.queryDoh(settings.dohResolver, domain, 'A', settings.timeout).catch(() => []),
-            this.queryDoh(settings.dohResolver, domain, 'AAAA', settings.timeout).catch(() => []),
-            this.resolveHnsBioProfile(domain, settings).catch(() => null)
-        ]);
-        const records = { TXT: [], CNAME: cnameRecords, A: aRecords, AAAA: aaaaRecords };
+        const response = await this.queryRecordSet(domain, ['TXT', 'CNAME', 'A', 'AAAA']);
+        if (response.rcode === 3) {
+            return null;
+        }
+        const records = response.records;
+        const hnsProfile = this.parseHnsBioProfile(domain, records.TXT);
 
-        return this.buildAddressResult(domain, records, hnsProfile)
-            || this.buildCnameResult(domain, records, hnsProfile);
+        return this.buildAddressResult(domain, records, hnsProfile, response)
+            || this.buildCnameResult(domain, records, hnsProfile, response);
     }
 
     normalizeDomain(domain) {
@@ -248,8 +316,8 @@ class HNSResolver {
 
         try {
             const data = await this.fetchJson(url.toString(), settings.timeout);
-            const hnsProfile = await this.resolveHnsBioProfile(domain, settings);
-            const webResult = await this.resolveHeadlessWebRecords(domain);
+            const hnsProfile = await this.resolveHnsBioProfile(domain).catch(() => null);
+            const webResult = await this.resolveHeadlessWebRecords(domain).catch(() => null);
             if (webResult) {
                 return webResult;
             }
@@ -283,23 +351,20 @@ class HNSResolver {
     }
 
     async resolveViaDoh(domain, options = {}) {
-        const settings = this.getResolverSettings();
-        const [txtRecords, cnameRecords, aRecords, aaaaRecords] = await Promise.all([
-            this.queryDoh(settings.dohResolver, domain, 'TXT', settings.timeout).catch(() => []),
-            this.queryDoh(settings.dohResolver, domain, 'CNAME', settings.timeout).catch(() => []),
-            this.queryDoh(settings.dohResolver, domain, 'A', settings.timeout).catch(() => []),
-            this.queryDoh(settings.dohResolver, domain, 'AAAA', settings.timeout).catch(() => [])
-        ]);
-        const records = { TXT: txtRecords, CNAME: cnameRecords, A: aRecords, AAAA: aaaaRecords };
-        const hnsProfile = this.parseHnsBioProfile(domain, txtRecords);
+        const response = await this.queryRecordSet(domain, ['TXT', 'CNAME', 'A', 'AAAA'], options);
+        if (response.rcode === 3) {
+            return null;
+        }
+        const records = response.records;
+        const hnsProfile = this.parseHnsBioProfile(domain, records.TXT);
 
         if (options.preferWebRecords) {
-            const addressResult = this.buildAddressResult(domain, records, hnsProfile);
+            const addressResult = this.buildAddressResult(domain, records, hnsProfile, response);
             if (addressResult) {
                 return addressResult;
             }
 
-            const cnameResult = this.buildCnameResult(domain, records, hnsProfile);
+            const cnameResult = this.buildCnameResult(domain, records, hnsProfile, response);
             if (cnameResult) {
                 return cnameResult;
             }
@@ -307,31 +372,31 @@ class HNSResolver {
             return null;
         }
 
-        const redirectUrl = this.findUrlInTxt(txtRecords);
+        const redirectUrl = this.findUrlInTxt(records.TXT);
         if (redirectUrl) {
             return {
                 domain,
-                source: 'hnsdoh',
+                ...this.getResolutionMetadata(response),
                 url: redirectUrl,
                 hnsProfile,
                 records
             };
         }
 
-        const cnameResult = this.buildCnameResult(domain, records, hnsProfile);
+        const cnameResult = this.buildCnameResult(domain, records, hnsProfile, response);
         if (cnameResult) {
             return cnameResult;
         }
 
-        const addressResult = this.buildAddressResult(domain, records, hnsProfile);
+        const addressResult = this.buildAddressResult(domain, records, hnsProfile, response);
         if (addressResult) {
             return addressResult;
         }
 
-        if (txtRecords.length > 0) {
+        if (records.TXT.length > 0) {
             return {
                 domain,
-                source: 'hnsdoh',
+                ...this.getResolutionMetadata(response),
                 hnsProfile,
                 records
             };
@@ -340,19 +405,29 @@ class HNSResolver {
         return null;
     }
 
-    async resolveHnsBioProfile(domain, settings = this.getResolverSettings()) {
-        const txtRecords = await this.queryDoh(settings.dohResolver, domain, 'TXT', settings.timeout).catch(() => []);
-        return this.parseHnsBioProfile(domain, txtRecords);
+    async resolveHnsBioProfile(domain) {
+        const response = await this.queryRecordSet(domain, ['TXT']);
+        return response.rcode === 3 ? null : this.parseHnsBioProfile(domain, response.records.TXT);
     }
 
-    buildCnameResult(domain, records, hnsProfile = null) {
+    getResolutionMetadata(response) {
+        const resolver = this.getPublicResolverInfo(response?.resolver);
+        return {
+            source: resolver ? `hns:${resolver.id}` : 'hns-resolver',
+            resolver,
+            resolverFallbackCount: response?.fallbackCount || 0,
+            resolverAttempts: Array.isArray(response?.attempts) ? response.attempts : []
+        };
+    }
+
+    buildCnameResult(domain, records, hnsProfile = null, response = null) {
         if (!records.CNAME.length) {
             return null;
         }
 
         return {
             domain,
-            source: 'hnsdoh',
+            ...this.getResolutionMetadata(response),
             url: `http://${records.CNAME[0]}`,
             canonicalName: records.CNAME[0],
             hnsProfile,
@@ -360,14 +435,14 @@ class HNSResolver {
         };
     }
 
-    buildAddressResult(domain, records, hnsProfile = null) {
+    buildAddressResult(domain, records, hnsProfile = null, response = null) {
         if (!records.A.length && !records.AAAA.length) {
             return null;
         }
 
         return {
             domain,
-            source: 'hnsdoh',
+            ...this.getResolutionMetadata(response),
             url: `http://${domain}`,
             address: records.A[0] || records.AAAA[0],
             addressType: records.A.length > 0 ? 'A' : 'AAAA',
@@ -410,10 +485,128 @@ class HNSResolver {
         };
     }
 
+    getRcodeName(rcode) {
+        return DNS_RCODE_NAMES[rcode] || `RCODE_${rcode}`;
+    }
+
+    createDnsResponseError(rcode, message = '') {
+        const rcodeName = this.getRcodeName(rcode);
+        const error = new Error(message || `DNS ${rcodeName}`);
+        error.code = 'DNS_RESPONSE_ERROR';
+        error.rcode = rcode;
+        error.rcodeName = rcodeName;
+        return error;
+    }
+
+    async queryRecordSet(domain, typeNames, options = {}) {
+        const cleanDomain = this.normalizeDomain(domain);
+        const requestedTypes = [...new Set(typeNames)].filter(type => DNS_TYPES[type]);
+        if (!cleanDomain || !requestedTypes.length) {
+            throw new Error('A valid DNS name and record type are required');
+        }
+
+        const settings = this.getResolverSettings();
+        const timeout = options.timeout || settings.timeout;
+        const candidateState = this.getResolverCandidateState(options);
+        const attempts = candidateState.cooling.map(candidate => ({
+            resolver: this.getPublicResolverInfo(candidate.resolver),
+            status: 'COOLDOWN',
+            elapsedMs: 0,
+            configuredIndex: candidate.configuredIndex,
+            retryAt: new Date(candidate.retryAt).toISOString()
+        }));
+        if (!candidateState.available.length) {
+            const error = new Error('All configured HNS resolvers are temporarily cooling down');
+            error.code = 'RESOLVER_COOLDOWN';
+            error.attempts = attempts;
+            throw error;
+        }
+
+        const failures = [];
+        for (const candidate of candidateState.available) {
+            const { resolver, configuredIndex } = candidate;
+            const startedAt = Date.now();
+            try {
+                const responses = await Promise.all(requestedTypes.map(typeName =>
+                    this.queryResolver(resolver, cleanDomain, typeName, timeout)
+                ));
+                const rcodes = new Set(responses.map(response => response.rcode));
+                if (rcodes.size > 1) {
+                    throw new Error(`Inconsistent DNS status across record types: ${[...rcodes].map(code => this.getRcodeName(code)).join(', ')}`);
+                }
+
+                const rcode = responses[0]?.rcode ?? 0;
+                if (rcode !== 0 && rcode !== 3) {
+                    throw this.createDnsResponseError(rcode);
+                }
+
+                const records = Object.fromEntries(requestedTypes.map(type => [type, []]));
+                responses.forEach((response, responseIndex) => {
+                    records[requestedTypes[responseIndex]] = response.records;
+                });
+                const elapsedMs = Date.now() - startedAt;
+                this.markResolverSuccess(resolver, elapsedMs, this.getRcodeName(rcode), configuredIndex);
+                attempts.push({
+                    resolver: this.getPublicResolverInfo(resolver),
+                    status: this.getRcodeName(rcode),
+                    elapsedMs,
+                    configuredIndex
+                });
+                return {
+                    domain: cleanDomain,
+                    records,
+                    rcode,
+                    rcodeName: this.getRcodeName(rcode),
+                    resolver,
+                    fallbackCount: configuredIndex,
+                    elapsedMs,
+                    attempts: attempts.sort((left, right) => left.configuredIndex - right.configuredIndex)
+                };
+            } catch (error) {
+                const elapsedMs = Date.now() - startedAt;
+                this.markResolverFailure(resolver, error, elapsedMs);
+                attempts.push({
+                    resolver: this.getPublicResolverInfo(resolver),
+                    status: error.rcodeName || error.code || 'ERROR',
+                    elapsedMs,
+                    configuredIndex,
+                    message: error.message
+                });
+                failures.push(`${resolver.id}: ${error.message}`);
+            }
+        }
+
+        const error = new Error(failures.join('; ') || `No HNS resolver available for ${cleanDomain}`);
+        error.code = 'RESOLVER_FAILURE';
+        throw error;
+    }
+
+    async queryResolver(resolverInput, domain, typeName, timeout) {
+        const resolver = normalizeResolverDescriptor(resolverInput);
+        if (!resolver) {
+            throw new Error('Invalid resolver configuration');
+        }
+        if (resolver.transport === 'dns-json') {
+            return this.queryDnsJson(resolver, domain, typeName, timeout);
+        }
+        return this.queryDohResponse(resolver.url, domain, typeName, timeout);
+    }
+
     async queryDoh(resolverUrl, domain, typeName, timeout) {
+        const response = await this.queryDohResponse(resolverUrl, domain, typeName, timeout);
+        if (response.rcode !== 0 && response.rcode !== 3) {
+            throw this.createDnsResponseError(response.rcode);
+        }
+        return response.records;
+    }
+
+    async queryDohResponse(resolverUrl, domain, typeName, timeout) {
         const resolver = this.normalizeDohResolver(resolverUrl);
         if (!resolver) {
             throw new Error(`Invalid DoH resolver: ${resolverUrl}`);
+        }
+        if (!DNS_TYPES[typeName]) {
+            throw new Error(`Unsupported DNS record type: ${typeName}`);
         }
         const query = this.buildDnsQuery(domain, DNS_TYPES[typeName]);
         const url = new URL(resolver);
@@ -424,10 +617,149 @@ class HNSResolver {
             'User-Agent': 'SkyInclude/1.0.0'
         });
 
-        return this.parseDnsResponse(buffer, typeName);
+        return this.parseDnsResponseMessage(buffer, typeName, {
+            id: query.readUInt16BE(0),
+            domain,
+            qtype: DNS_TYPES[typeName]
+        });
+    }
+
+    async queryDnsJson(resolverInput, domain, typeName, timeout) {
+        const resolver = normalizeResolverDescriptor(resolverInput);
+        if (!resolver || resolver.transport !== 'dns-json') {
+            throw new Error('Invalid DNS JSON resolver');
+        }
+        if (!DNS_TYPES[typeName]) {
+            throw new Error(`Unsupported DNS record type: ${typeName}`);
+        }
+
+        const url = new URL(resolver.url);
+        url.searchParams.set('name', this.normalizeDomain(domain));
+        url.searchParams.set('type', typeName);
+        const data = await this.fetchJson(url.toString(), timeout, {
+            Accept: 'application/dns-json',
+            'User-Agent': 'SkyInclude/1.0.0'
+        });
+        return this.parseDnsJsonResponse(data, domain, typeName);
+    }
+
+    parseDnsJsonResponse(data, domain, typeName) {
+        if (!data || typeof data !== 'object' || Array.isArray(data)) {
+            throw new Error('Malformed DNS JSON response');
+        }
+
+        const rcode = Number(data.Status);
+        if (!Number.isInteger(rcode) || rcode < 0 || rcode > 15) {
+            throw new Error('DNS JSON response is missing a valid Status');
+        }
+
+        const questions = Array.isArray(data.Question) ? data.Question : [];
+        if (questions.length !== 1) {
+            throw new Error('DNS JSON response must contain exactly one Question');
+        }
+
+        const question = questions[0] || {};
+        const questionName = this.normalizeDomain(question.name);
+        const questionType = Number(question.type);
+        if (questionName !== this.normalizeDomain(domain) || questionType !== DNS_TYPES[typeName]) {
+            throw new Error('DNS JSON Question does not match the request');
+        }
+
+        if (rcode !== 0 && rcode !== 3) {
+            throw this.createDnsResponseError(rcode);
+        }
+
+        const records = rcode === 3
+            ? []
+            : this.parseDnsJsonAnswers(data.Answer, typeName);
+        return {
+            records,
+            rcode,
+            rcodeName: this.getRcodeName(rcode)
+        };
+    }
+
+    parseDnsJsonAnswers(answers, typeName) {
+        if (answers !== undefined && !Array.isArray(answers)) {
+            throw new Error('DNS JSON Answer must be an array');
+        }
+
+        const expectedType = DNS_TYPES[typeName];
+        return (answers || [])
+            .filter(answer => Number(answer?.type) === expectedType)
+            .map(answer => {
+                const record = this.parseDnsJsonRecord(answer?.data, typeName);
+                if (!record) {
+                    throw new Error(`Malformed ${typeName} record in DNS JSON response`);
+                }
+                return record;
+            });
+    }
+
+    parseDnsJsonRecord(value, typeName) {
+        const data = String(value ?? '').trim();
+        if (!data) {
+            return null;
+        }
+
+        if (typeName === 'A') {
+            return net.isIP(data) === 4 ? data : null;
+        }
+        if (typeName === 'AAAA') {
+            return net.isIP(data) === 6 ? data : null;
+        }
+        if (typeName === 'CNAME') {
+            const name = this.normalizeDomain(data);
+            return this.isValidDnsName(name) ? name : null;
+        }
+        if (typeName === 'TXT') {
+            return this.parseDnsJsonTxt(data);
+        }
+        if (typeName === 'TLSA') {
+            const match = data.match(/^(\d+)\s+(\d+)\s+(\d+)\s+([0-9a-f]+)$/i);
+            if (!match) {
+                return null;
+            }
+            return {
+                usage: Number(match[1]),
+                selector: Number(match[2]),
+                matchingType: Number(match[3]),
+                certificateAssociationData: match[4].toLowerCase()
+            };
+        }
+        return null;
+    }
+
+    parseDnsJsonTxt(data) {
+        if (!data.startsWith('"')) {
+            return data;
+        }
+
+        const chunks = [];
+        const pattern = /"((?:\\.|[^"\\])*)"/g;
+        let match;
+        while ((match = pattern.exec(data)) !== null) {
+            try {
+                chunks.push(JSON.parse(`"${match[1]}"`));
+            } catch (error) {
+                throw new Error('Malformed quoted TXT record');
+            }
+        }
+        return chunks.length ? chunks.join('') : null;
+    }
+
+    isValidDnsName(name) {
+        return Boolean(name)
+            && name.length <= 253
+            && name.split('.').every(label => label.length <= 63
+                && /^[a-z0-9_](?:[a-z0-9_-]*[a-z0-9_])?$/i.test(label));
     }
 
     buildDnsQuery(name, qtype) {
+        const cleanName = this.normalizeDomain(name);
+        if (!this.isValidDnsName(cleanName)) {
+            throw new Error(`Invalid DNS name: ${name}`);
+        }
         const queryId = Math.floor(Math.random() * 65535);
         const header = Buffer.alloc(12);
         header.writeUInt16BE(queryId, 0);
@@ -435,7 +767,7 @@ class HNSResolver {
         header.writeUInt16BE(1, 4);
 
         const labels = [];
-        for (const part of name.split('.')) {
+        for (const part of cleanName.split('.')) {
             const label = Buffer.from(part, 'ascii');
             labels.push(Buffer.from([label.length]), label);
         }
@@ -449,26 +781,66 @@ class HNSResolver {
     }
 
     parseDnsResponse(buffer, typeName) {
+        return this.parseDnsResponseMessage(buffer, typeName).records;
+    }
+
+    parseDnsResponseMessage(buffer, typeName, expected = null) {
         if (buffer.length < 12) {
-            return [];
+            throw new Error('DNS response is shorter than its header');
         }
 
         let offset = 12;
+        const responseId = buffer.readUInt16BE(0);
+        const flags = buffer.readUInt16BE(2);
         const qdcount = buffer.readUInt16BE(4);
         const ancount = buffer.readUInt16BE(6);
+        const rcode = flags & 0x000f;
         const results = [];
+
+        if ((flags & 0x8000) === 0) {
+            throw new Error('DNS message is not a response');
+        }
+        if ((flags & 0x0200) !== 0) {
+            throw new Error('Truncated DNS response');
+        }
+        if (expected?.id !== undefined && responseId !== expected.id) {
+            throw new Error('DNS response transaction ID does not match the request');
+        }
+        if (expected && qdcount !== 1) {
+            throw new Error('DNS response must contain exactly one Question');
+        }
 
         for (let i = 0; i < qdcount; i += 1) {
             const questionName = this.readDnsName(buffer, offset);
+            if (questionName.offset + 4 > buffer.length) {
+                throw new Error('Malformed DNS Question');
+            }
+            const questionType = buffer.readUInt16BE(questionName.offset);
+            const questionClass = buffer.readUInt16BE(questionName.offset + 2);
             offset = questionName.offset + 4;
+            if (expected && (
+                this.normalizeDomain(questionName.name) !== this.normalizeDomain(expected.domain)
+                || questionType !== expected.qtype
+                || questionClass !== 1
+            )) {
+                throw new Error('DNS Question does not match the request');
+            }
         }
 
+        if (rcode !== 0 && rcode !== 3) {
+            throw this.createDnsResponseError(rcode);
+        }
+        if (rcode === 3) {
+            return { records: [], rcode, rcodeName: this.getRcodeName(rcode) };
+        }
+
+        let parsedAnswers = 0;
         for (let i = 0; i < ancount && offset < buffer.length; i += 1) {
             const answerName = this.readDnsName(buffer, offset);
             offset = answerName.offset;
 
             if (offset + 10 > buffer.length) {
-                break;
+                throw new Error('Malformed DNS answer metadata');
             }
 
             const type = buffer.readUInt16BE(offset);
@@ -479,31 +851,43 @@ class HNSResolver {
             offset += 2;
 
             if (offset + rdlength > buffer.length) {
-                break;
+                throw new Error('DNS answer exceeds response length');
             }
 
             const rdataStart = offset;
             const rdata = buffer.subarray(offset, offset + rdlength);
 
-            if (typeName === 'A' && type === DNS_TYPES.A && rdlength === 4) {
+            if (typeName === 'A' && type === DNS_TYPES.A) {
+                if (rdlength !== 4) throw new Error('Malformed A record');
                 results.push(Array.from(rdata).join('.'));
-            } else if (typeName === 'AAAA' && type === DNS_TYPES.AAAA && rdlength === 16) {
+            } else if (typeName === 'AAAA' && type === DNS_TYPES.AAAA) {
+                if (rdlength !== 16) throw new Error('Malformed AAAA record');
                 results.push(this.formatIpv6(rdata));
             } else if (typeName === 'TXT' && type === DNS_TYPES.TXT) {
-                results.push(...this.parseTxtRecord(rdata));
+                results.push(this.parseTxtRecord(rdata).join(''));
             } else if (typeName === 'CNAME' && type === DNS_TYPES.CNAME) {
-                results.push(this.readDnsName(buffer, rdataStart).name);
+                const cname = this.normalizeDomain(this.readDnsName(buffer, rdataStart).name);
+                if (!this.isValidDnsName(cname)) throw new Error('Malformed CNAME record');
+                results.push(cname);
             } else if (typeName === 'TLSA' && type === DNS_TYPES.TLSA) {
                 const record = this.parseTlsaRecord(rdata);
-                if (record) {
-                    results.push(record);
-                }
+                if (!record) throw new Error('Malformed TLSA record');
+                results.push(record);
             }
 
             offset += rdlength;
+            parsedAnswers += 1;
         }
 
-        return results.filter(Boolean);
+        if (parsedAnswers !== ancount) {
+            throw new Error('DNS response ended before all answers were parsed');
+        }
+
+        return {
+            records: results.filter(Boolean),
+            rcode,
+            rcodeName: this.getRcodeName(rcode)
+        };
     }
 
     readDnsName(buffer, startOffset) {
@@ -529,13 +913,23 @@ class HNSResolver {
             }
 
             if ((length & 0xc0) === 0xc0) {
+                if (offset + 1 >= buffer.length) {
+                    throw new Error('Truncated DNS compression pointer');
+                }
                 const pointer = ((length & 0x3f) << 8) | buffer[offset + 1];
+                if (pointer >= buffer.length) {
+                    throw new Error('DNS compression pointer exceeds response length');
+                }
                 if (!jumped) {
                     nextOffset = offset + 2;
                 }
                 offset = pointer;
                 jumped = true;
                 continue;
+            }
+
+            if (length > 63 || offset + 1 + length > buffer.length) {
+                throw new Error('Malformed DNS label');
             }
 
             offset += 1;
@@ -559,6 +953,9 @@ class HNSResolver {
         while (offset < buffer.length) {
             const length = buffer[offset];
             offset += 1;
+            if (offset + length > buffer.length) {
+                throw new Error('Malformed TXT record');
+            }
             records.push(buffer.subarray(offset, offset + length).toString('utf8'));
             offset += length;
         }
@@ -584,34 +981,27 @@ class HNSResolver {
     }
 
     async resolveTLSARecords(domain, options = {}) {
-        const settings = this.getResolverSettings();
         const tlsaName = this.buildTlsaName(domain);
-        const resolvers = this.getDohResolverCandidates(options);
-        const timeout = options.timeout || settings.timeout;
-        const lookupErrors = [];
+        const candidateKey = normalizeResolverList([
+            options.resolver,
+            options.dohResolver,
+            ...this.getResolverSettings().resolvers
+        ]).map(resolver => this.getResolverKey(resolver)).join(',');
+        const cacheKey = `${candidateKey}|${tlsaName}`.toLowerCase();
+        const cached = this.tlsaCache.get(cacheKey);
 
-        for (const resolver of resolvers) {
-            const cacheKey = `${resolver}|${tlsaName}`.toLowerCase();
-            const cached = this.tlsaCache.get(cacheKey);
-
-            if (!options.force && cached && Date.now() - cached.timestamp < this.tlsaCacheTimeout) {
-                return cached.records;
-            }
-
-            try {
-                const records = await this.queryDoh(resolver, tlsaName, 'TLSA', timeout);
-                this.tlsaCache.set(cacheKey, {
-                    records,
-                    timestamp: Date.now()
-                });
-
-                return records;
-            } catch (error) {
-                lookupErrors.push(`${resolver}: ${error.message}`);
-            }
+        if (!options.force && cached && Date.now() - cached.timestamp < this.tlsaCacheTimeout) {
+            return cached.records;
         }
 
-        throw new Error(lookupErrors.join('; ') || `No DoH resolver available for ${tlsaName}`);
+        const response = await this.queryRecordSet(tlsaName, ['TLSA'], options);
+        const records = response.rcode === 3 ? [] : response.records.TLSA;
+        this.tlsaCache.set(cacheKey, {
+            records,
+            resolver: this.getPublicResolverInfo(response.resolver),
+            timestamp: Date.now()
+        });
+        return records;
     }
 
     isSupportedTlsaRecord(record) {
@@ -691,12 +1081,17 @@ class HNSResolver {
         return null;
     }
 
-    async fetchJson(url, timeout) {
+    async fetchJson(url, timeout, headers = {}) {
         const buffer = await this.fetchBuffer(url, timeout, {
             Accept: 'application/json',
-            'User-Agent': 'SkyInclude/1.0.0'
+            'User-Agent': 'SkyInclude/1.0.0',
+            ...headers
         });
-        return JSON.parse(buffer.toString('utf8'));
+        try {
+            return JSON.parse(buffer.toString('utf8'));
+        } catch (error) {
+            throw new Error('Response was not valid JSON');
+        }
     }
 
     fetchBuffer(url, timeout, headers = {}) {
@@ -710,7 +1105,9 @@ class HNSResolver {
                 response.on('end', () => {
                     const buffer = Buffer.concat(chunks);
                     if (response.statusCode < 200 || response.statusCode >= 300) {
-                        reject(new Error(`HTTP ${response.statusCode}: ${buffer.toString('utf8').slice(0, 120)}`));
+                        const error = new Error(`HTTP ${response.statusCode}: ${buffer.toString('utf8').slice(0, 120)}`);
+                        error.code = `HTTP_${response.statusCode}`;
+                        reject(error);
                         return;
                     }
                     resolve(buffer);
@@ -719,7 +1116,9 @@ class HNSResolver {
 
             request.on('error', reject);
             request.setTimeout(timeout, () => {
-                request.destroy(new Error('Request timeout'));
+                const error = new Error('Request timeout');
+                error.code = 'REQUEST_TIMEOUT';
+                request.destroy(error);
             });
         });
     }
@@ -844,13 +1243,22 @@ class HNSResolver {
     clearCache() {
         this.cache.clear();
         this.tlsaCache.clear();
+        this.resolverHealth.clear();
     }
 
     getCacheStats() {
         return {
             size: this.cache.size,
-            tlsaSize: this.tlsaCache.size
+            tlsaSize: this.tlsaCache.size,
+            unhealthyResolvers: this.resolverHealth.size
         };
+    }
+
+    getResolverDiagnostics() {
+        return this.resolverDiagnostics.map(entry => ({
+            ...entry,
+            resolver: entry.resolver ? { ...entry.resolver } : null
+        }));
     }
 }
 
@@ -863,5 +1271,6 @@ module.exports = {
     checkTraditionalDNS: domain => resolver.checkTraditionalDNS(domain),
     updateSettings: settings => resolver.updateSettings(settings),
     clearCache: () => resolver.clearCache(),
-    getCacheStats: () => resolver.getCacheStats()
+    getCacheStats: () => resolver.getCacheStats(),
+    getResolverDiagnostics: () => resolver.getResolverDiagnostics()
 };

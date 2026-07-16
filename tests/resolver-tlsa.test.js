@@ -186,12 +186,12 @@ test('falls back to another DoH resolver for TLSA records', async () => {
     }];
     const attempts = [];
 
-    resolver.queryDoh = async (resolverUrl) => {
-        attempts.push(resolverUrl);
-        if (resolverUrl.includes('primary.invalid')) {
+    resolver.queryResolver = async (resolverConfig) => {
+        attempts.push(resolverConfig.url);
+        if (resolverConfig.url.includes('primary.invalid')) {
             throw new Error('HTTP 502: no downstream server available');
         }
-        return expected;
+        return { records: expected, rcode: 0, rcodeName: 'NOERROR' };
     };
 
     const records = await resolver.resolveTLSARecords('secure.hns', { force: true });
@@ -217,14 +217,18 @@ test('clears TLSA cache with resolver cache', async () => {
 test('caches TLSA lookups briefly', async () => {
     const resolver = new HNSResolver(settingsManager(true));
     let queryCount = 0;
-    resolver.queryDoh = async () => {
+    resolver.queryResolver = async () => {
         queryCount += 1;
-        return [{
-            usage: 3,
-            selector: 1,
-            matchingType: 1,
-            certificateAssociationData: 'ab'.repeat(32)
-        }];
+        return {
+            records: [{
+                usage: 3,
+                selector: 1,
+                matchingType: 1,
+                certificateAssociationData: 'ab'.repeat(32)
+            }],
+            rcode: 0,
+            rcodeName: 'NOERROR'
+        };
     };
 
     const first = await resolver.resolveTLSARecords('secure.hns');
