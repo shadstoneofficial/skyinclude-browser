@@ -2191,17 +2191,16 @@ body { margin: 0; background: #fff; color: #111827; font-family: -apple-system, 
         }
 
         const anchor = payload.anchor && typeof payload.anchor === 'object' ? payload.anchor : {};
-        const parentBounds = this.mainWindow.getBounds();
+        const contentBounds = this.mainWindow.getContentBounds();
         const width = 360;
-        const height = Math.min(520, 110 + profile.entries.length * 70);
+        const anchorY = contentBounds.y + Math.round(Number(anchor.bottom) || 90) + 8;
+        const availableHeight = contentBounds.y + contentBounds.height - anchorY - 12;
+        const height = Math.min(520, 110 + profile.entries.length * 70, Math.max(180, availableHeight));
         const x = Math.min(
-            Math.max(parentBounds.x + 12, parentBounds.x + Math.round(Number(anchor.left) || 0) - 24),
-            parentBounds.x + parentBounds.width - width - 12
+            Math.max(contentBounds.x + 12, contentBounds.x + Math.round(Number(anchor.left) || 0) - 24),
+            contentBounds.x + contentBounds.width - width - 12
         );
-        const y = Math.min(
-            parentBounds.y + parentBounds.height - height - 12,
-            parentBounds.y + Math.round(Number(anchor.bottom) || 90) + 8
-        );
+        const y = anchorY;
 
         this.closeHnsProfilePopover();
         this.hnsProfilePopover = new BrowserWindow({
@@ -2269,6 +2268,7 @@ body { margin: 0; background: #fff; color: #111827; font-family: -apple-system, 
 
     buildHnsProfilePopoverDataUrl(profile) {
         const entriesJson = JSON.stringify(profile.entries).replace(/</g, '\\u003c');
+        const imageUrlJson = JSON.stringify(profile.imageUrl || null).replace(/</g, '\\u003c');
         const groups = Object.entries(CATEGORY_META).map(([category, meta]) => {
             const rows = profile.entries.map((entry, index) => ({ entry, index }))
                 .filter(({ entry }) => entry.category === category)
@@ -2300,13 +2300,17 @@ body { margin: 0; background: #fff; color: #111827; font-family: -apple-system, 
 <html>
 <head>
 <meta charset="utf-8">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src https:; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
 <style>
 * { box-sizing: border-box; }
 body { margin: 0; background: transparent; color: #111827; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; overflow: hidden; }
 button, a { -webkit-tap-highlight-color: transparent; }
 .card { background: #fff; border: 1px solid rgba(15, 23, 42, .12); border-radius: 12px; box-shadow: 0 16px 36px rgba(15, 23, 42, .20), 0 3px 10px rgba(15, 23, 42, .08); height: 100vh; overflow: hidden; }
 .header { align-items: center; background: linear-gradient(135deg, #f8fafc 0%, #f0fdf4 100%); border-bottom: 1px solid #e5e7eb; display: flex; gap: 12px; padding: 14px; }
-.profile-mark { align-items: center; background: #15803d; border: 3px solid rgba(255, 255, 255, .9); border-radius: 50%; box-shadow: 0 2px 7px rgba(21, 128, 61, .22); color: #fff; display: flex; flex: 0 0 42px; font-size: 11px; font-weight: 900; height: 42px; justify-content: center; letter-spacing: .04em; }
+.profile-mark { align-items: center; background: #15803d; border: 3px solid rgba(255, 255, 255, .9); border-radius: 50%; box-shadow: 0 2px 7px rgba(21, 128, 61, .22); color: #fff; display: flex; flex: 0 0 42px; font-size: 11px; font-weight: 900; height: 42px; justify-content: center; letter-spacing: .04em; overflow: hidden; position: relative; }
+.profile-image { height: 100%; inset: 0; object-fit: cover; opacity: 0; position: absolute; transition: opacity .12s ease; width: 100%; }
+.profile-image.loaded { opacity: 1; }
 .profile-meta { flex: 1; min-width: 0; }
 .kicker { color: #15803d; font-size: 10px; font-weight: 800; letter-spacing: .07em; margin-bottom: 3px; text-transform: uppercase; }
 .domain { color: #111827; font-size: 16px; font-weight: 750; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -2340,7 +2344,10 @@ button, a { -webkit-tap-highlight-color: transparent; }
 <body>
 <div class="card">
     <div class="header">
-        <div class="profile-mark" aria-hidden="true">HNS</div>
+        <div class="profile-mark" aria-hidden="true">
+            <span>HNS</span>
+            ${profile.imageUrl ? '<img id="profile-image" class="profile-image" alt="">' : ''}
+        </div>
         <div class="profile-meta">
             <div class="kicker">Handshake profile</div>
             <div class="domain">${this.escapeHtml(profile.domain)}</div>
@@ -2352,6 +2359,13 @@ button, a { -webkit-tap-highlight-color: transparent; }
 </div>
 <script>
 const entries = ${entriesJson};
+const profileImageUrl = ${imageUrlJson};
+const profileImage = document.getElementById('profile-image');
+if (profileImage && profileImageUrl) {
+    profileImage.addEventListener('load', () => profileImage.classList.add('loaded'));
+    profileImage.addEventListener('error', () => profileImage.remove());
+    profileImage.src = profileImageUrl;
+}
 function fallbackCopy(text) {
     const textarea = document.createElement('textarea');
     textarea.value = text;

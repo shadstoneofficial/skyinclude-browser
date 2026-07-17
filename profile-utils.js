@@ -42,6 +42,21 @@ function normalizeWebUrl(value, { allowHttp = true } = {}) {
     }
 }
 
+function normalizeProfileImageUrl(value) {
+    const text = String(value || '').trim();
+    if (!text || /[\u0000-\u001f\u007f]/.test(text)) return null;
+
+    const candidate = /^[a-z][a-z0-9+.-]*:/i.test(text) ? text : `https://${text}`;
+    try {
+        const parsed = new URL(candidate);
+        if (parsed.protocol !== 'https:' || !parsed.hostname) return null;
+        if (parsed.username || parsed.password) return null;
+        return parsed.toString();
+    } catch {
+        return null;
+    }
+}
+
 function buildSafeProfileUrl(key, value) {
     const normalizedKey = normalizeKey(key);
     const text = String(value || '').trim();
@@ -72,7 +87,10 @@ function buildSafeProfileUrl(key, value) {
 function sanitizeHnsProfile(profile) {
     if (!profile || !Array.isArray(profile.entries) || !profile.entries.length) return null;
 
-    const entries = profile.entries.slice(0, 24).map(entry => {
+    const sourceEntries = profile.entries.slice(0, 24);
+    const imageEntry = sourceEntries.find(entry => normalizeKey(entry.key || entry.label) === 'pfp');
+    const imageUrl = normalizeProfileImageUrl(imageEntry?.value);
+    const entries = sourceEntries.filter(entry => normalizeKey(entry.key || entry.label) !== 'pfp').map(entry => {
         const key = normalizeKey(entry.key || entry.label);
         const value = String(entry.value || '').trim().slice(0, 500);
         return {
@@ -84,15 +102,19 @@ function sanitizeHnsProfile(profile) {
         };
     }).filter(entry => entry.value);
 
-    return entries.length ? {
+    if (!entries.length && !imageUrl) return null;
+
+    return {
         domain: String(profile.domain || 'HNS profile').trim().slice(0, 120),
+        ...(imageUrl ? { imageUrl } : {}),
         entries
-    } : null;
+    };
 }
 
 module.exports = {
     CATEGORY_META,
     buildSafeProfileUrl,
     classifyProfileEntry,
+    normalizeProfileImageUrl,
     sanitizeHnsProfile
 };

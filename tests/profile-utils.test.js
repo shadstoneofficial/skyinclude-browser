@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const {
     buildSafeProfileUrl,
     classifyProfileEntry,
+    normalizeProfileImageUrl,
     sanitizeHnsProfile
 } = require('../profile-utils.js');
 
@@ -49,4 +50,29 @@ test('sanitizes, categorizes, and limits profile data', () => {
 test('rejects control characters and unsafe protocols', () => {
     assert.equal(buildSafeProfileUrl('link', 'https://example.com/\nattack'), null);
     assert.equal(buildSafeProfileUrl('manifest', 'data:text/html,test'), null);
+});
+
+test('accepts only credential-free HTTPS profile images', () => {
+    assert.equal(
+        normalizeProfileImageUrl('pbs.twimg.com/profile_images/example.jpg'),
+        'https://pbs.twimg.com/profile_images/example.jpg'
+    );
+    assert.equal(normalizeProfileImageUrl('https://example.com/avatar.png'), 'https://example.com/avatar.png');
+    assert.equal(normalizeProfileImageUrl('http://example.com/avatar.png'), null);
+    assert.equal(normalizeProfileImageUrl('data:image/png;base64,test'), null);
+    assert.equal(normalizeProfileImageUrl('https://user:pass@example.com/avatar.png'), null);
+});
+
+test('promotes pfp to a safe image instead of an ordinary record', () => {
+    const profile = sanitizeHnsProfile({
+        domain: 'hnsbroker.chatbot',
+        entries: [
+            { key: 'pfp', label: 'Profile image', value: 'pbs.twimg.com/profile_images/avatar.jpg' },
+            { key: 'x', label: 'X', value: 'hnsbroker' }
+        ]
+    });
+
+    assert.equal(profile.imageUrl, 'https://pbs.twimg.com/profile_images/avatar.jpg');
+    assert.equal(profile.entries.length, 1);
+    assert.equal(profile.entries[0].key, 'x');
 });
