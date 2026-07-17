@@ -44,7 +44,7 @@ test('SettingsManager persists legacy resolver strings as ordered descriptors', 
     }
 });
 
-test('SettingsManager upgrades only the untouched legacy default with built-in Web3DNS', () => {
+test('SettingsManager upgrades the untouched legacy default with all current built-ins', () => {
     const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'skyinclude-default-settings-'));
     const settingsPath = path.join(userData, 'settings.json');
     fs.writeFileSync(settingsPath, JSON.stringify({
@@ -63,8 +63,81 @@ test('SettingsManager upgrades only the untouched legacy default with built-in W
         delete require.cache[require.resolve('../settings')];
         const SettingsManager = require('../settings');
         const manager = new SettingsManager();
-        assert.deepEqual(manager.getSetting('hnsResolvers').map(resolver => resolver.id), ['hnsdoh', 'web3dns']);
-        assert.equal(manager.getSetting('hnsResolverDefaultsVersion'), 2);
+        assert.deepEqual(
+            manager.getSetting('hnsResolvers').map(resolver => resolver.id),
+            ['hnsdoh', 'web3dns', 'shakestation']
+        );
+        assert.equal(manager.getSetting('hnsResolverDefaultsVersion'), 3);
+    } finally {
+        Module._load = originalLoad;
+        delete require.cache[require.resolve('../settings')];
+        fs.rmSync(userData, { recursive: true, force: true });
+    }
+});
+
+test('SettingsManager adds Shakestation to the untouched version 2 built-in pair', () => {
+    const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'skyinclude-v2-default-settings-'));
+    const settingsPath = path.join(userData, 'settings.json');
+    fs.writeFileSync(settingsPath, JSON.stringify({
+        hnsResolvers: [
+            'https://hnsdoh.com/dns-query',
+            'dns-json https://api.web3dns.net/'
+        ],
+        hnsResolverDefaultsVersion: 2
+    }));
+
+    const originalLoad = Module._load;
+    Module._load = function(request, parent, isMain) {
+        if (request === 'electron') {
+            return { app: { getPath: () => userData } };
+        }
+        return originalLoad.call(this, request, parent, isMain);
+    };
+
+    try {
+        delete require.cache[require.resolve('../settings')];
+        const SettingsManager = require('../settings');
+        const manager = new SettingsManager();
+        assert.deepEqual(
+            manager.getSetting('hnsResolvers').map(resolver => resolver.id),
+            ['hnsdoh', 'web3dns', 'shakestation']
+        );
+        assert.equal(manager.getSetting('hnsResolverDefaultsVersion'), 3);
+    } finally {
+        Module._load = originalLoad;
+        delete require.cache[require.resolve('../settings')];
+        fs.rmSync(userData, { recursive: true, force: true });
+    }
+});
+
+test('SettingsManager preserves customized version 2 resolver order', () => {
+    const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'skyinclude-v2-custom-settings-'));
+    const settingsPath = path.join(userData, 'settings.json');
+    fs.writeFileSync(settingsPath, JSON.stringify({
+        hnsResolvers: [
+            'dns-json https://api.web3dns.net/',
+            'https://hnsdoh.com/dns-query'
+        ],
+        hnsResolverDefaultsVersion: 2
+    }));
+
+    const originalLoad = Module._load;
+    Module._load = function(request, parent, isMain) {
+        if (request === 'electron') {
+            return { app: { getPath: () => userData } };
+        }
+        return originalLoad.call(this, request, parent, isMain);
+    };
+
+    try {
+        delete require.cache[require.resolve('../settings')];
+        const SettingsManager = require('../settings');
+        const manager = new SettingsManager();
+        assert.deepEqual(
+            manager.getSetting('hnsResolvers').map(resolver => resolver.id),
+            ['web3dns', 'hnsdoh']
+        );
+        assert.equal(manager.getSetting('hnsResolverDefaultsVersion'), 3);
     } finally {
         Module._load = originalLoad;
         delete require.cache[require.resolve('../settings')];

@@ -35,7 +35,7 @@ test('preserves explicit descriptor order and removes exact duplicates', () => {
     assert.equal(formatResolverSetting(resolvers[0]), 'dns-json https://second.example/');
 });
 
-test('infers Web3DNS JSON transport and DoH paths', () => {
+test('infers known resolver transports and DoH paths', () => {
     assert.deepEqual(
         normalizeResolverDescriptor('https://api.web3dns.net/'),
         {
@@ -49,6 +49,16 @@ test('infers Web3DNS JSON transport and DoH paths', () => {
     assert.equal(
         normalizeResolverDescriptor('custom.example').url,
         'https://custom.example/dns-query'
+    );
+    assert.deepEqual(
+        normalizeResolverDescriptor('https://resolve.shakestation.io/dns-query'),
+        {
+            id: 'shakestation',
+            name: 'Shakestation DoH',
+            transport: 'doh-wire',
+            url: 'https://resolve.shakestation.io/dns-query',
+            enabled: true
+        }
     );
 });
 

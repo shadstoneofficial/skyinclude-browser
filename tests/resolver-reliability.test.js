@@ -23,9 +23,12 @@ function response(records = [], rcode = 0) {
 const primary = { id: 'primary', name: 'Primary', transport: 'doh-wire', url: 'https://primary.invalid/dns-query' };
 const secondary = { id: 'secondary', name: 'Secondary', transport: 'dns-json', url: 'https://secondary.invalid/' };
 
-test('uses HNS DoH then built-in Web3DNS and puts a custom resolver first', () => {
+test('uses HNS DoH, Web3DNS, then Shakestation and puts a custom resolver first', () => {
     const defaultResolver = new HNSResolver();
-    assert.deepEqual(defaultResolver.getResolverSettings().resolvers.map(resolver => resolver.id), ['hnsdoh', 'web3dns']);
+    assert.deepEqual(
+        defaultResolver.getResolverSettings().resolvers.map(resolver => resolver.id),
+        ['hnsdoh', 'web3dns', 'shakestation']
+    );
 
     const configured = new HNSResolver({
         getSetting(key) {

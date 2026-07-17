@@ -7,7 +7,7 @@ const {
     normalizeResolverList
 } = require('./resolver-config.js');
 
-const HNS_RESOLVER_DEFAULTS_VERSION = 2;
+const HNS_RESOLVER_DEFAULTS_VERSION = 3;
 
 class SettingsManager {
     constructor() {
@@ -108,9 +108,15 @@ class SettingsManager {
         const normalized = normalizeResolverList(this.settings.hnsResolvers || []);
         const currentVersion = Number(this.settings.hnsResolverDefaultsVersion) || 0;
         const isLegacyDefault = normalized.length === 1 && normalized[0].id === 'hnsdoh';
+        const previousBuiltIns = BUILT_IN_RESOLVERS.slice(0, 2);
+        const isPreviousDefault = normalized.length === previousBuiltIns.length
+            && normalized.every((resolver, index) => (
+                resolver.transport === previousBuiltIns[index].transport
+                && resolver.url === previousBuiltIns[index].url
+            ));
         this.settings.hnsResolvers = currentVersion < HNS_RESOLVER_DEFAULTS_VERSION
-            && isLegacyDefault
-            ? normalizeResolverList([...normalized, BUILT_IN_RESOLVERS[1]])
+            && (isLegacyDefault || isPreviousDefault)
+            ? normalizeResolverList(BUILT_IN_RESOLVERS)
             : normalized;
         this.settings.hnsResolverDefaultsVersion = HNS_RESOLVER_DEFAULTS_VERSION;
         return before !== JSON.stringify({

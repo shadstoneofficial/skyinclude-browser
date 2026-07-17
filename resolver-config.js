@@ -6,7 +6,8 @@ const RESOLVER_TRANSPORTS = new Set(['doh-wire', 'dns-json']);
 const KNOWN_RESOLVERS = {
     'hnsdoh.com': { id: 'hnsdoh', name: 'HNS DoH', transport: 'doh-wire' },
     'query.hdns.io': { id: 'hdns', name: 'HDNS', transport: 'doh-wire' },
-    'api.web3dns.net': { id: 'web3dns', name: 'Web3DNS', transport: 'dns-json' }
+    'api.web3dns.net': { id: 'web3dns', name: 'Web3DNS', transport: 'dns-json' },
+    'resolve.shakestation.io': { id: 'shakestation', name: 'Shakestation DoH', transport: 'doh-wire' }
 };
 
 const BUILT_IN_RESOLVERS = [
@@ -22,6 +23,13 @@ const BUILT_IN_RESOLVERS = [
         name: 'Web3DNS',
         transport: 'dns-json',
         url: 'https://api.web3dns.net/',
+        enabled: true
+    },
+    {
+        id: 'shakestation',
+        name: 'Shakestation DoH',
+        transport: 'doh-wire',
+        url: 'https://resolve.shakestation.io/dns-query',
         enabled: true
     }
 ];

@@ -38,8 +38,9 @@ The built-in order is:
 
 1. HNS DoH (`doh-wire https://hnsdoh.com/dns-query`)
 2. Web3DNS (`dns-json https://api.web3dns.net/`)
+3. Shakestation DoH (`doh-wire https://resolve.shakestation.io/dns-query`)
 
-New installs receive both entries. Existing installs that still have the untouched legacy single-HNSDoH default are upgraded to this pair. Explicitly customized resolver lists keep their order, and the optional custom resolver remains first.
+New installs receive all three entries. Existing installs that still have either the untouched legacy single-HNSDoH default or the untouched HNSDoH/Web3DNS built-in pair are upgraded to this three-endpoint order. Explicitly customized resolver lists keep their exact order, and the optional custom resolver remains first.
 
 The Web3DNS API root is the JSON endpoint. `https://api.web3dns.net/dns-query` is not used. The community-provided native resolver IPs (`82.68.70.162` and `82.68.70.163`) are deliberately not accepted in this list: native DNS is a different, unencrypted transport and must not be normalized into a DoH URL.
 
@@ -49,7 +50,7 @@ The resolver test in Settings uses the saved resolver order and reports the endp
 
 Every third-party resolver can observe the names sent to it. Resolver selection therefore affects privacy as well as availability. Diagnostics retain a small in-memory history containing endpoint identity, transport, latency, status, and fallback count. They do not add answer contents or additional queried-name logging.
 
-Built-in endpoint changes require an explicit release decision backed by current health checks. Web3DNS was approved as the second built-in resolver; it does not replace HNS DoH as the first choice.
+Built-in endpoint changes require an explicit release decision backed by current health checks. Web3DNS remains the second built-in resolver. Shakestation was approved as the third, wire-format DoH fallback after its service recovered; it remains last because point-in-time probes showed intermittent first-query latency. Neither endpoint replaces HNS DoH as the first choice.
 
 The address bar continues to show the HNS hostname and path, for example:
 
