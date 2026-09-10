@@ -306,7 +306,7 @@ class HNSResolver {
         const actionsUrl = data.actions_url
             || profile.actions_url
             || integrations.action_manager?.url
-            || `${profileUrl}#actions`;
+            || `https://headlessdomains.com/actions/${encodeURIComponent(domain)}`;
 
         return {
             profileUrl,

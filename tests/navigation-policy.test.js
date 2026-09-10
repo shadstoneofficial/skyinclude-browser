@@ -37,7 +37,7 @@ test('temporary HeadlessDomains failure offers explicit recovery and identity ch
     const actions = buildTemporaryResolutionActions('http://lisa.agent/', {
         headlessLinks: {
             profileUrl: 'https://profiles.host.limo/lisa.agent',
-            actionsUrl: 'https://profiles.host.limo/lisa.agent#actions',
+            actionsUrl: 'https://headlessdomains.com/actions/lisa.agent',
             manifestUrl: 'https://headlessdomains.com/manifests/lisa.agent.json'
         }
     });

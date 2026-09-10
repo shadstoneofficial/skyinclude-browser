@@ -305,6 +305,21 @@ test('authoritative NOERROR without web records permits HeadlessDomains fallback
     assert.equal(result.resolutionState, 'authoritative-absence');
     assert.equal(result.url, 'https://headlessdomains.com/manifests/identity.agent.json');
     assert.equal(result.headlessLinks.profileUrl, 'https://profiles.host.limo/identity.agent');
+    assert.equal(result.headlessLinks.actionsUrl, 'https://headlessdomains.com/actions/identity.agent');
+});
+
+test('legacy HeadlessDomains lookup payload uses the canonical public actions page', () => {
+    const resolver = new HNSResolver(settings([primary]));
+    const links = resolver.getHeadlessLinks('lisa.agent', {
+        manifests: { agent_json: 'https://headlessdomains.com/manifests/lisa.agent.json' },
+        profile: { web_presence: { fallback_url: 'https://profiles.host.limo/lisa.agent' } },
+        integrations: { arp_chat: { enabled: false, url: null } }
+    });
+
+    assert.equal(links.actionsUrl, 'https://headlessdomains.com/actions/lisa.agent');
+    assert.equal(resolver.getHeadlessLinks('lisa.agent', {
+        actions_url: 'https://headlessdomains.com/actions/lisa.agent?view=compact'
+    }).actionsUrl, 'https://headlessdomains.com/actions/lisa.agent?view=compact');
 });
 
 test('all temporarily unavailable resolvers produce a non-cacheable status result', async () => {
