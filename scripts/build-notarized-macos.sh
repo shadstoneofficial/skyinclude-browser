@@ -87,7 +87,9 @@ fi
 # The certificate is already imported into DMG_KEYCHAIN above. Leaving CSC_LINK
 # set makes newer electron-builder versions import it into a second temporary
 # keychain, where set-key-partition-list can fail before signing begins.
-export CSC_NAME="${APP_SIGN_IDENTITY}"
+# electron-builder expects the certificate subject without the identity type
+# prefix (for example, "Example Corp (TEAMID)").
+export CSC_NAME="${APP_SIGN_IDENTITY#Developer ID Application: }"
 unset CSC_LINK CSC_KEY_PASSWORD
 
 require_env "APPLE_ID"
