@@ -78,6 +78,18 @@ fi
 
 setup_dmg_signing_keychain
 
+APP_SIGN_IDENTITY="$(developer_id_identity)"
+if [[ -z "${APP_SIGN_IDENTITY}" ]]; then
+    echo "No Developer ID Application identity found for app signing." >&2
+    exit 1
+fi
+
+# The certificate is already imported into DMG_KEYCHAIN above. Leaving CSC_LINK
+# set makes newer electron-builder versions import it into a second temporary
+# keychain, where set-key-partition-list can fail before signing begins.
+export CSC_NAME="${APP_SIGN_IDENTITY}"
+unset CSC_LINK CSC_KEY_PASSWORD
+
 require_env "APPLE_ID"
 require_env "APPLE_APP_SPECIFIC_PASSWORD"
 require_env "APPLE_TEAM_ID"
