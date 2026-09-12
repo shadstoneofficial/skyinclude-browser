@@ -11,6 +11,12 @@ const SettingsManager = require('./settings.js');
 const { HNSResolver } = require('./resolver.js');
 const { inspectHnsHttpsCertificate } = require('./hns-tls.js');
 const { CATEGORY_META, sanitizeHnsProfile } = require('./profile-utils.js');
+const {
+    buildNativeHnsHttpNavigation,
+    buildTemporaryResolutionActions,
+    isHNSDomain,
+    isIPAddress
+} = require('./navigation-policy.js');
 
 let activeBrowser = null;
 const LATEST_RELEASE_URL = 'https://github.com/shadstoneofficial/skyinclude-browser/releases/latest';
@@ -787,6 +793,11 @@ class SkyIncludeBrowser {
         try {
             const parsedUrl = new URL(url);
             const hostname = parsedUrl.hostname;
+
+            if (parsedUrl.searchParams.get('__skyinclude_native_http') === '1' && this.isHNSDomain(hostname)) {
+                parsedUrl.searchParams.delete('__skyinclude_native_http');
+                return this.buildUnresolvedHNSNavigation(parsedUrl.toString(), hostname);
+            }
             
             // Check if it's potentially an HNS domain
             if (this.isHNSDomain(hostname)) {
@@ -966,32 +977,11 @@ class SkyIncludeBrowser {
     }
 
     isHNSDomain(hostname) {
-        const normalized = hostname.toLowerCase();
-        if (this.isIPAddress(normalized)) {
-            return false;
-        }
-
-        const icannTlds = new Set([
-            'com', 'org', 'net', 'edu', 'gov', 'mil', 'int', 'io', 'co',
-            'ai', 'app', 'dev', 'xyz', 'info', 'biz', 'us', 'uk', 'ca',
-            'de', 'fr', 'jp', 'cn', 'au', 'in', 'br', 'ru', 'ch', 'nl'
-        ]);
-        const hnsHints = new Set([
-            'hns', 'agent', 'chatbot', 'nb', 'sats', 'blockchain', 'crypto',
-            'mercenary', 'bit', 'coin', 'wallet'
-        ]);
-
-        const parts = normalized.split('.').filter(Boolean);
-        if (parts.length === 1) {
-            return /^[a-z0-9-]+$/.test(parts[0]);
-        }
-
-        const tld = parts[parts.length - 1];
-        return hnsHints.has(tld) || !icannTlds.has(tld);
+        return isHNSDomain(hostname);
     }
 
     isIPAddress(hostname) {
-        return /^\d{1,3}(\.\d{1,3}){3}$/.test(hostname) || hostname.includes(':');
+        return isIPAddress(hostname);
     }
 
     async resolveHNS(domain) {
@@ -1193,6 +1183,10 @@ class SkyIncludeBrowser {
             return { url: resolution };
         }
 
+        if (resolution.resolutionState === 'temporary-failure') {
+            return this.buildTemporaryHNSNavigation(originalUrl, resolution);
+        }
+
         if (resolution.url && !resolution.address) {
             return { url: resolution.url, hostingProvider, hnsProfile: resolution.hnsProfile || null };
         }
@@ -1202,14 +1196,8 @@ class SkyIncludeBrowser {
                 return await this.buildHNSHttpsNavigation(originalUrl, resolution, hostingProvider);
             }
 
-            parsedUrl.protocol = 'http:';
-
             return {
-                url: parsedUrl.toString(),
-                displayUrl: `${resolution.domain}${parsedUrl.pathname}${parsedUrl.search}${parsedUrl.hash}`,
-                hnsHostHeader: resolution.domain,
-                proxyHost: resolution.domain,
-                resolvedHost: resolution.address,
+                ...buildNativeHnsHttpNavigation(originalUrl, resolution),
                 bypassCache: true,
                 hostingProvider,
                 hnsProfile: resolution.hnsProfile || null,
@@ -1228,6 +1216,30 @@ class SkyIncludeBrowser {
         }
 
         throw new Error(`No browsable HNS records found for ${resolution.domain}`);
+    }
+
+    buildTemporaryHNSNavigation(originalUrl, resolution) {
+        const parsedUrl = new URL(originalUrl);
+        const domain = resolution.domain || parsedUrl.hostname;
+        return {
+            url: this.buildHNSStatusDataUrl({
+                title: 'Native website temporarily unavailable',
+                domain,
+                body: 'SkyInclude could not confirm this domain\'s native website because every configured HNS resolver temporarily failed. No identity or manifest fallback was opened automatically.',
+                originalUrl,
+                error: resolution.error?.message || null,
+                severity: 'warning',
+                actions: buildTemporaryResolutionActions(originalUrl, resolution)
+            }),
+            displayUrl: `${domain}${parsedUrl.pathname}${parsedUrl.search}${parsedUrl.hash}`,
+            bypassCache: true,
+            hostingProvider: null,
+            hnsProfile: null,
+            securityInfo: this.buildSecurityInfo('hns-unresolved', {
+                domain,
+                state: 'temporary-failure'
+            })
+        };
     }
 
     async buildHNSHttpsNavigation(originalUrl, resolution, hostingProvider = null) {

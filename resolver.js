@@ -233,9 +233,13 @@ class HNSResolver {
             const settings = this.getResolverSettings();
 
             if (this.isHeadlessDomain(cleanDomain)) {
-                result = await this.resolveHeadlessWebRecords(cleanDomain);
+                try {
+                    result = await this.resolveHeadlessWebRecords(cleanDomain);
+                } catch (error) {
+                    result = await this.buildTemporaryResolutionResult(cleanDomain, error);
+                }
                 if (!result) {
-                    result = await this.lookupHeadlessDomain(cleanDomain);
+                    result = await this.lookupHeadlessDomain(cleanDomain, { websiteAbsent: true });
                 }
                 if (!result && settings.resolutionMode === 'p2p') {
                     result = await this.resolveP2P(cleanDomain);
@@ -248,7 +252,7 @@ class HNSResolver {
                 result = await this.resolveViaDoh(cleanDomain);
             }
 
-            if (result) {
+            if (result && result.resolutionState !== 'temporary-failure') {
                 this.cache.set(cacheKey, {
                     result,
                     timestamp: Date.now()
@@ -258,31 +262,12 @@ class HNSResolver {
             return result;
         } catch (error) {
             console.error('HNS resolution failed:', error.message);
-            return null;
+            return this.buildTemporaryResolutionResult(cleanDomain, error);
         }
     }
 
     async resolveHeadlessWebRecords(domain) {
-        const attempts = 5;
-
-        for (let attempt = 1; attempt <= attempts; attempt += 1) {
-            try {
-                const result = await this.resolveWebRecordsOnly(domain);
-                if (result) {
-                    return result;
-                }
-            } catch (error) {
-                if (error.code === 'RESOLVER_COOLDOWN') {
-                    return null;
-                }
-            }
-
-            if (attempt < attempts) {
-                await new Promise(resolve => setTimeout(resolve, 250 * attempt));
-            }
-        }
-
-        return null;
+        return this.resolveWebRecordsOnly(domain);
     }
 
     async resolveWebRecordsOnly(domain) {
@@ -310,28 +295,82 @@ class HNSResolver {
         return domain.endsWith('.agent') || domain.endsWith('.chatbot');
     }
 
-    async lookupHeadlessDomain(domain) {
+    getHeadlessLinks(domain, data = {}) {
+        const manifests = data.manifests || {};
+        const profile = data.profile || {};
+        const integrations = data.integrations || {};
+        const profileUrl = profile.url
+            || profile.web_presence?.fallback_url
+            || `https://profiles.host.limo/${domain}`;
+        const manifestUrl = manifests.agent_json || `https://headlessdomains.com/manifests/${domain}.json`;
+        const actionsUrl = data.actions_url
+            || profile.actions_url
+            || integrations.action_manager?.url
+            || `https://headlessdomains.com/actions/${encodeURIComponent(domain)}`;
+
+        return {
+            profileUrl,
+            actionsUrl,
+            manifestUrl
+        };
+    }
+
+    async fetchHeadlessMetadata(domain) {
         const settings = this.getResolverSettings();
         const url = new URL(encodeURIComponent(domain), settings.headlessLookupBase);
+        return this.fetchJson(url.toString(), settings.timeout);
+    }
+
+    async buildTemporaryResolutionResult(domain, error) {
+        let data = null;
+        if (this.isHeadlessDomain(domain)) {
+            data = await this.fetchHeadlessMetadata(domain).catch(() => null);
+        }
+
+        return {
+            domain,
+            source: 'hns-resolver',
+            resolutionState: 'temporary-failure',
+            temporaryFailure: true,
+            error: {
+                code: error?.code || error?.rcodeName || 'RESOLVER_FAILURE',
+                message: error?.message || 'HNS resolution temporarily failed',
+                attempts: Array.isArray(error?.attempts) ? error.attempts : []
+            },
+            headlessLinks: this.isHeadlessDomain(domain) ? this.getHeadlessLinks(domain, data || {}) : null,
+            records: data ? { metadata: data } : {}
+        };
+    }
+
+    async lookupHeadlessDomain(domain, options = {}) {
+        if (options.websiteAbsent !== true) {
+            try {
+                const webResult = await this.resolveHeadlessWebRecords(domain);
+                if (webResult) {
+                    return webResult;
+                }
+            } catch (error) {
+                return this.buildTemporaryResolutionResult(domain, error);
+            }
+        }
 
         try {
-            const data = await this.fetchJson(url.toString(), settings.timeout);
+            const data = await this.fetchHeadlessMetadata(domain);
             const hnsProfile = await this.resolveHnsBioProfile(domain).catch(() => null);
-            const webResult = await this.resolveHeadlessWebRecords(domain).catch(() => null);
-            if (webResult) {
-                return webResult;
-            }
             const manifests = data.manifests || {};
             const profile = data.profile || {};
             const integrations = data.integrations || {};
             const arpChat = integrations.arp_chat || {};
             const redirectUrl = manifests.agent_json || manifests.skill_md || profile.url || arpChat.url;
+            const headlessLinks = this.getHeadlessLinks(domain, data);
 
             if (!redirectUrl) {
                 return {
                     domain,
                     source: 'headlessdomains',
+                    resolutionState: 'authoritative-absence',
                     url: `https://headlessdomains.com/${domain}`,
+                    headlessLinks,
                     hnsProfile,
                     records: { metadata: data }
                 };
@@ -340,7 +379,9 @@ class HNSResolver {
             return {
                 domain,
                 source: 'headlessdomains',
+                resolutionState: 'authoritative-absence',
                 url: redirectUrl,
+                headlessLinks,
                 hnsProfile,
                 records: { metadata: data }
             };
@@ -578,6 +619,7 @@ class HNSResolver {
 
         const error = new Error(failures.join('; ') || `No HNS resolver available for ${cleanDomain}`);
         error.code = 'RESOLVER_FAILURE';
+        error.attempts = attempts.sort((left, right) => left.configuredIndex - right.configuredIndex);
         throw error;
     }
 

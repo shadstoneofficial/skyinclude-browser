@@ -21,6 +21,8 @@ Resolver settings are ordered. SkyInclude asks one endpoint for the complete log
 
 Authoritative `NXDOMAIN` and successful `NOERROR` with no records are terminal answers for that lookup. This prevents a fallback resolver with a different collision policy or stale root view from silently replacing an authoritative result.
 
+These authoritative answers are distinct from temporary resolver failures. A timeout, transport or TLS/HTTP error, rate limit, `SERVFAIL`, malformed response, or the local resolver cooldown means that SkyInclude does not know whether web records exist. It must not convert that uncertainty into an identity fallback or cache it as a website result. Instead, the browser shows an internal “Native website temporarily unavailable” page with Retry and explicit links for native HTTP and, when applicable, HeadlessDomains profile, actions, and manifest views.
+
 After an endpoint failure, an in-memory circuit breaker skips it for 30 seconds. This prevents every navigation from paying the full timeout while a community resolver is offline. Changing resolver settings or clearing the resolver cache resets this local health state.
 
 ### Settings format
@@ -80,7 +82,9 @@ Names ending in `.agent` and `.chatbot` can work as both websites and agent iden
 
 1. A / AAAA records are loaded through the local HNS proxy with the original `Host` header preserved.
 2. CNAME records are used next.
-3. If no web-hosting record exists, the browser falls back to HeadlessDomains agent manifests, skill manifests, and profile URLs.
+3. Only after an authoritative `NOERROR` response contains no A, AAAA, or CNAME web-hosting record (or the name is authoritatively absent) does the browser fall back to HeadlessDomains identity information.
+
+Published manifest actions are identity metadata; they do not change this order. Adding an `actions` array to a manifest cannot displace a native site. If every resolver is temporarily unavailable, SkyInclude keeps the native hostname visible and presents an internal status page. It never opens raw manifest JSON automatically in that case, and the transient result is not cached, so a later retry can recover immediately when HNS resolution returns. Directly entering a HeadlessDomains manifest URL remains supported because that is an explicit user choice on an ordinary HTTPS origin.
 
 This lets domains such as `mike.agent`, `pourspout.agent`, and `saltrimmer.agent` open their hosted websites by default while keeping their agent manifests discoverable.
 

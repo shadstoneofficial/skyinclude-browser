@@ -268,20 +268,108 @@ test('TLSA lookup can fall back from wire DoH to DNS JSON', async () => {
     assert.deepEqual(await resolver.resolveTLSARecords('secure.hns', { force: true }), [expected]);
 });
 
-test('HeadlessDomains manifest fallback remains available while DNS resolvers cool down', async () => {
+test('a lisa.agent-style A record wins even when its manifest publishes actions', async () => {
     const resolver = new HNSResolver(settings([primary]));
-    resolver.queryResolver = async () => {
-        throw new Error('resolver offline');
+    let identityLookups = 0;
+    resolver.queryResolver = async (candidate, domain, type) => response(
+        type === 'A' ? ['134.209.111.52'] : []
+    );
+    resolver.lookupHeadlessDomain = async () => {
+        identityLookups += 1;
+        return {
+            url: 'https://headlessdomains.com/manifests/lisa.agent.json',
+            records: { metadata: { actions: [{ id: 'action-manager.published' }] } }
+        };
     };
+
+    const result = await resolver.resolveHNSDomain('lisa.agent');
+
+    assert.equal(result.address, '134.209.111.52');
+    assert.equal(result.url, 'http://lisa.agent');
+    assert.equal(result.source, 'hns:primary');
+    assert.equal(result.resolutionState, undefined);
+    assert.equal(identityLookups, 0);
+});
+
+test('authoritative NOERROR without web records permits HeadlessDomains fallback', async () => {
+    const resolver = new HNSResolver(settings([primary]));
+    resolver.queryResolver = async () => response([]);
     resolver.fetchJson = async () => ({
-        manifests: { agent_json: 'https://example.com/agent.json' },
-        profile: {},
+        manifests: { agent_json: 'https://headlessdomains.com/manifests/identity.agent.json' },
+        profile: { web_presence: { fallback_url: 'https://profiles.host.limo/identity.agent' } },
         integrations: {}
     });
 
-    await resolver.resolveHeadlessWebRecords('mike.agent');
-    const result = await resolver.lookupHeadlessDomain('mike.agent');
+    const result = await resolver.resolveHNSDomain('identity.agent');
 
-    assert.equal(result.source, 'headlessdomains');
-    assert.equal(result.url, 'https://example.com/agent.json');
+    assert.equal(result.resolutionState, 'authoritative-absence');
+    assert.equal(result.url, 'https://headlessdomains.com/manifests/identity.agent.json');
+    assert.equal(result.headlessLinks.profileUrl, 'https://profiles.host.limo/identity.agent');
+    assert.equal(result.headlessLinks.actionsUrl, 'https://headlessdomains.com/actions/identity.agent');
+});
+
+test('legacy HeadlessDomains lookup payload uses the canonical public actions page', () => {
+    const resolver = new HNSResolver(settings([primary]));
+    const links = resolver.getHeadlessLinks('lisa.agent', {
+        manifests: { agent_json: 'https://headlessdomains.com/manifests/lisa.agent.json' },
+        profile: { web_presence: { fallback_url: 'https://profiles.host.limo/lisa.agent' } },
+        integrations: { arp_chat: { enabled: false, url: null } }
+    });
+
+    assert.equal(links.actionsUrl, 'https://headlessdomains.com/actions/lisa.agent');
+    assert.equal(resolver.getHeadlessLinks('lisa.agent', {
+        actions_url: 'https://headlessdomains.com/actions/lisa.agent?view=compact'
+    }).actionsUrl, 'https://headlessdomains.com/actions/lisa.agent?view=compact');
+});
+
+test('all temporarily unavailable resolvers produce a non-cacheable status result', async () => {
+    const resolver = new HNSResolver(settings([primary]));
+    resolver.queryResolver = async () => {
+        const error = new Error('resolver rate limited');
+        error.code = 'HTTP_429';
+        throw error;
+    };
+    resolver.fetchJson = async () => ({
+        manifests: { agent_json: 'https://headlessdomains.com/manifests/lisa.agent.json' },
+        profile: { web_presence: { fallback_url: 'https://profiles.host.limo/lisa.agent' } },
+        integrations: {}
+    });
+
+    const result = await resolver.resolveHNSDomain('lisa.agent');
+
+    assert.equal(result.resolutionState, 'temporary-failure');
+    assert.equal(result.temporaryFailure, true);
+    assert.equal(result.url, undefined);
+    assert.equal(result.error.code, 'RESOLVER_FAILURE');
+    assert.equal(result.headlessLinks.manifestUrl, 'https://headlessdomains.com/manifests/lisa.agent.json');
+    assert.equal(resolver.cache.has('lisa.agent'), false);
+
+    const cooldownResult = await resolver.resolveHNSDomain('lisa.agent');
+    assert.equal(cooldownResult.resolutionState, 'temporary-failure');
+    assert.equal(cooldownResult.url, undefined);
+    assert.equal(cooldownResult.error.code, 'RESOLVER_COOLDOWN');
+    assert.equal(resolver.cache.has('lisa.agent'), false);
+});
+
+test('resolver recovery after a transient failure returns and caches the native website', async () => {
+    const resolver = new HNSResolver(settings([primary]));
+    resolver.resolverCooldownMs = 0;
+    let attempts = 0;
+    resolver.queryResolver = async (candidate, domain, type) => {
+        attempts += 1;
+        if (attempts <= 4) {
+            const error = new Error('temporary transport error');
+            error.code = 'ECONNRESET';
+            throw error;
+        }
+        return response(type === 'A' ? ['134.209.111.52'] : []);
+    };
+    resolver.fetchJson = async () => ({ manifests: {}, profile: {}, integrations: {} });
+
+    const unavailable = await resolver.resolveHNSDomain('lisa.agent');
+    const recovered = await resolver.resolveHNSDomain('lisa.agent');
+
+    assert.equal(unavailable.resolutionState, 'temporary-failure');
+    assert.equal(recovered.address, '134.209.111.52');
+    assert.equal(resolver.cache.get('lisa.agent').result.address, '134.209.111.52');
 });
