@@ -38,7 +38,7 @@ function applyToolchainPatch(projectRoot = path.resolve(__dirname, '..')) {
     }
     const patch = path.join(projectRoot, 'patches', 'app-builder-lib+26.15.3.patch');
     for (const check of [true, false]) {
-        const args = ['apply', '--whitespace=error', ...(check ? ['--check'] : []), patch];
+        const args = ['-c', 'core.autocrlf=false', 'apply', '--whitespace=error', ...(check ? ['--check'] : []), patch];
         const result = spawnSync('git', args, { cwd: projectRoot, encoding: 'utf8' });
         if (result.error || result.status !== 0) {
             throw new Error(`Cannot ${check ? 'validate' : 'apply'} download patch (Git is required): ${result.error?.message || result.stderr}`);
