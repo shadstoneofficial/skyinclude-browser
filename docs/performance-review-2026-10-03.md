@@ -133,9 +133,38 @@ machine gave ten consumers **4 DNS requests** (baseline: 40), native web ready a
 rejected after **63 ms** for a **60 ms** deadline (baseline completed at 252 ms).
 These are synthetic timing observations, not promised real-world page speedups.
 
-Remaining before merge/release: resolve the inherited dependency-audit failure
-with a reviewed, packaging-verified toolchain change; manual Electron UI smoke tests of the documented
+The dependency-audit failure above describes the initial implementation handoff;
+the approved follow-up below supersedes that blocker.
+
+Remaining before merge/release: manual Electron UI smoke tests of the documented
 HNS/ICANN targets, multi-tab background behavior, native HTTPS trust indicators,
 and POST reload prompts. Installed-app CPU/memory/battery/page-paint benchmarks
 and cross-platform packaged-app checks were not run. The draft PR is a source
 review handoff, not a release approval.
+
+## Approved dependency/toolchain follow-up
+
+The user approved dependency/toolchain cleanup after the first implementation
+handoff. See [toolchain maintenance](toolchain-maintenance.md) for the pinned
+versions, audit rationale, guarded compatibility patch, and future upgrade rules.
+
+- Refresh compatible brace-expansion and fast-uri patches; remove the vulnerable
+  Got/shared-cache dependency chain by using the public Fetch downloader API.
+- Preserve the already-locked Electron 42.11.3 and stable packager 26.15.3;
+  pin the build dependencies and align CI/README with Node 22.12.0+.
+- Keep the full dev-inclusive audit gate. The patch refuses unknown packager
+  versions/files, preserves verified downloads, progress, retry, body deadlines,
+  and HTTP proxy/bypass support. Browser proxy/Host/SNI/DANE paths are unchanged.
+- Fresh `npm ci` applies and verifies the patch; `npm audit --audit-level=high`
+  now reports **0 vulnerabilities**.
+- Full suite: **140/140 passed**, including eight new build-tool tests, with
+  zero failures/skips/cancellations. Existing native HNS/ICANN and manifest,
+  resolver-recovery, Host/hostname, DANE/TLSA, and SNI regressions remain green.
+- An unsigned macOS arm64 unpacked-app smoke build passed using explicit
+  `identity: null`, `notarize: false`, and `publish: never`, outside the repository
+  in a temporary output directory. No installer, DMG, signed/notarized build,
+  release/tag, binary publication, app installation, or `/Applications` replacement
+  was performed. Cross-platform packaging and manual UI verification still remain.
+- Packaged ASAR inspection verified the runtime modules and IANA snapshot are
+  present and build-only tools are excluded. Staged whitespace, sensitive-file,
+  credential-pattern, large-file, and generated-binary hygiene checks are clean.

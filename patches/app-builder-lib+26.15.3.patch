@@ -1,0 +1,131 @@
+diff --git a/node_modules/app-builder-lib/out/util/electronGet.js b/node_modules/app-builder-lib/out/util/electronGet.js
+index a941f9d..3c87e2c 100644
+--- a/node_modules/app-builder-lib/out/util/electronGet.js
++++ b/node_modules/app-builder-lib/out/util/electronGet.js
+@@ -8,6 +8,7 @@ exports.downloadElectronArtifact = downloadElectronArtifact;
+ exports.getBinariesMirrorUrl = getBinariesMirrorUrl;
+ const get = require("@electron/get");
+ const get_1 = require("@electron/get");
++const fetchDownload = require("./skyincludeFetchDownload");
+ const builder_util_1 = require("builder-util");
+ const _7zip_1 = require("../toolsets/7zip");
+ const multiProgress_1 = require("electron-publish/out/multiProgress");
+@@ -213,7 +214,6 @@ async function downloadArtifactToFile(config, label) {
+     const downloadOptions = {
+         timeout: { request: 10 * 60 * 1000 }, // prevent indefinite hang on stalled connections
+         ...config.downloadOptions,
+-        agent: (_b = (_a = config.downloadOptions) === null || _a === void 0 ? void 0 : _a.agent) !== null && _b !== void 0 ? _b : (0, builder_util_1.buildGotProxyAgent)(),
+         getProgressCallback: info => {
+             // @electron/get passes downloadOptions (including this callback) to its internal
+             // SHASUMS256.txt validation download. That file is tiny (<1 MB) and fires at 100%
+@@ -241,7 +241,7 @@ async function downloadArtifactToFile(config, label) {
+             return Promise.resolve();
+         },
+     };
+-    const configWithProgress = { ...config, downloadOptions };
++    const configWithProgress = { ...config, downloadOptions, downloader: config.downloader || new fetchDownload.BuilderFetchDownloader() };
+     try {
+         let filePath;
+         try {
+@@ -254,10 +254,7 @@ async function downloadArtifactToFile(config, label) {
+                     if (e instanceof builder_util_runtime_1.HttpError) {
+                         return e.isServerError();
+                     }
+-                    if (typeof ((_a = e === null || e === void 0 ? void 0 : e.response) === null || _a === void 0 ? void 0 : _a.statusCode) === "number") {
+-                        return e.response.statusCode >= 500;
+-                    }
+-                    return typeof (e === null || e === void 0 ? void 0 : e.code) === "string" && ["ENOTFOUND", "ETIMEDOUT", "ECONNRESET", "EPIPE", "ENOENT"].includes(e.code);
++                    return fetchDownload.shouldRetryDownloadError(e);
+                 },
+             });
+         }
+@@ -521,4 +518,4 @@ function getBinariesMirrorUrl(githubOrgRepo) {
+     }
+     return `https://github.com/${githubOrgRepo}/releases/download/`;
+ }
+-//# sourceMappingURL=electronGet.js.map
+\ No newline at end of file
++//# sourceMappingURL=electronGet.js.map
+diff --git a/node_modules/app-builder-lib/out/binDownload.js b/node_modules/app-builder-lib/out/binDownload.js
+index 287e873..019cd68 100644
+--- a/node_modules/app-builder-lib/out/binDownload.js
++++ b/node_modules/app-builder-lib/out/binDownload.js
+@@ -10,6 +10,7 @@ const dynamicImport_1 = require("./util/dynamicImport");
+ const filename_1 = require("builder-util/out/filename");
+ const path = require("path");
+ const electronGet_1 = require("./util/electronGet");
++const fetchDownload = require("./util/skyincludeFetchDownload");
+ const versionToPromise = new Map();
+ async function download(url, output, checksum) {
+     const filenameWithExt = path.basename(new URL(url).pathname);
+@@ -28,6 +29,7 @@ async function download(url, output, checksum) {
+         ...(checksum != null ? { checksums: { [filenameWithExt]: checksum } } : { unsafelyDisableChecksums: true }),
+         mirrorOptions: { resolveAssetURL: async () => Promise.resolve(url) },
+         isGeneric: true,
++        downloader: new fetchDownload.BuilderFetchDownloader(),
+     });
+     await fs.copyFile(downloadedFile, output);
+ }
+@@ -102,4 +104,4 @@ function getBin(cacheKey, url, checksum) {
+     versionToPromise.set(cacheName, promise);
+     return promise;
+ }
+-//# sourceMappingURL=binDownload.js.map
+\ No newline at end of file
++//# sourceMappingURL=binDownload.js.map
+diff --git a/node_modules/app-builder-lib/out/util/skyincludeFetchDownload.js b/node_modules/app-builder-lib/out/util/skyincludeFetchDownload.js
+new file mode 100644
+index 0000000..8f31545
+--- /dev/null
++++ b/node_modules/app-builder-lib/out/util/skyincludeFetchDownload.js
+@@ -0,0 +1,50 @@
++"use strict";
++// Build-only @electron/get v5 compatibility for pinned app-builder-lib 26.15.3.
++// Proxy/retry migration follows electron-builder@27.0.0-alpha.9's electronGet.ts;
++// the browser runtime and the rest of the stable packager are unchanged.
++const { FetchDownloader, initializeProxy } = require("@electron/get");
++let proxyInitialized = false;
++
++class BuilderFetchDownloader extends FetchDownloader {
++    async download(url, target, options = {}) {
++        const { timeout, agent, https, signal, ...fetchOptions } = options;
++        if (agent != null || (https != null && Object.keys(https).some(key => key !== "rejectUnauthorized" || https[key] !== true))) {
++            throw new Error("Legacy custom download agents and insecure TLS options are unsupported; use HTTP(S)_PROXY/NO_PROXY or Fetch RequestInit options.");
++        }
++        if (!proxyInitialized) {
++            initializeProxy();
++            proxyInitialized = true;
++        }
++        const duration = timeout?.request ?? 10 * 60 * 1000;
++        if (!Number.isSafeInteger(duration) || duration <= 0 || duration > 0xffffffff) {
++            throw new Error("Artifact download timeout must be a positive integer in milliseconds.");
++        }
++        // Each attempt (and checksum request) gets a fresh full-body deadline.
++        const deadline = AbortSignal.timeout(duration);
++        try {
++            await super.download(url, target, {
++                ...fetchOptions,
++                signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
++            });
++        } catch (error) {
++            if (deadline.aborted && !signal?.aborted) {
++                throw Object.assign(new Error("Artifact download timed out", { cause: error }), { code: "ETIMEDOUT" });
++            }
++            throw error;
++        }
++    }
++}
++
++function shouldRetryDownloadError(error) {
++    if (error == null || error.name === "AbortError") {
++        return false;
++    }
++    const status = error.response?.status ?? error.response?.statusCode;
++    if (typeof status === "number") {
++        return status >= 500 || status === 429;
++    }
++    const code = error.code ?? error.cause?.code;
++    return ["ENOTFOUND", "ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "EAI_AGAIN", "EPIPE", "ENOENT", "UND_ERR_SOCKET", "UND_ERR_CONNECT_TIMEOUT"].includes(code);
++}
++
++module.exports = { BuilderFetchDownloader, shouldRetryDownloadError };

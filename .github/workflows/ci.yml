@@ -14,7 +14,7 @@ env:
 
 jobs:
   checks:
-    name: Dependency audit and syntax checks
+    name: Dependency audit and tests
     runs-on: ubuntu-latest
 
     steps:
@@ -24,7 +24,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
 
       - name: Install dependencies
@@ -33,5 +33,5 @@ jobs:
       - name: Audit dependencies
         run: npm audit --audit-level=high
 
-      - name: Run syntax checks
+      - name: Run full test suite
         run: npm test

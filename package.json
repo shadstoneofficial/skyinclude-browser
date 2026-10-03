@@ -3,7 +3,11 @@
   "version": "0.1.23",
   "description": "Electron browser with native Handshake (HNS) domain resolution",
   "main": "main.js",
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "scripts": {
+    "postinstall": "node scripts/apply-toolchain-patch.js",
     "start": "electron .",
     "dev": "electron . --enable-logging",
     "build": "electron-builder",
@@ -18,7 +22,8 @@
     "dist-linux": "electron-builder --linux --publish=never",
     "pack": "electron-builder --dir",
     "benchmark:resolver": "node scripts/benchmark-resolver.js",
-    "check": "node --check main.js && node --check preload.js && node --check renderer.js && node --check resolver.js && node --check resolver-config.js && node --check navigation-policy.js && node --check settings.js && node --check history.js && node --check hns-tls.js && node --check profile-utils.js && node --check address-input.js && node --check async-log.js && node --check scripts/update-icann-tlds.js && node --check scripts/benchmark-resolver.js",
+    "check:toolchain": "node --check scripts/apply-toolchain-patch.js && node --check tests/helpers/toolchain-proxy-probe.js",
+    "check": "node --check main.js && node --check preload.js && node --check renderer.js && node --check resolver.js && node --check resolver-config.js && node --check navigation-policy.js && node --check settings.js && node --check history.js && node --check hns-tls.js && node --check profile-utils.js && node --check address-input.js && node --check async-log.js && node --check scripts/update-icann-tlds.js && node --check scripts/benchmark-resolver.js && npm run check:toolchain",
     "test": "npm run check && node --test tests/*.test.js"
   },
   "keywords": [
@@ -32,8 +37,13 @@
   "license": "MIT",
   "dependencies": {},
   "devDependencies": {
-    "electron": "^42.3.0",
-    "electron-builder": "^26.8.1"
+    "@electron/get": "5.1.0",
+    "electron": "42.11.3",
+    "electron-builder": "26.15.3",
+    "undici": "7.30.0"
+  },
+  "overrides": {
+    "@electron/get": "$@electron/get"
   },
   "build": {
     "appId": "com.skyinclude.browser",
