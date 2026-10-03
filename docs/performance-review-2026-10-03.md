@@ -136,7 +136,7 @@ These are synthetic timing observations, not promised real-world page speedups.
 The dependency-audit failure above describes the initial implementation handoff;
 the approved follow-up below supersedes that blocker.
 
-Remaining before merge/release: manual Electron UI smoke tests of the documented
+Remaining at the initial handoff before merge/release: manual Electron UI smoke tests of the documented
 HNS/ICANN targets, multi-tab background behavior, native HTTPS trust indicators,
 and POST reload prompts. Installed-app CPU/memory/battery/page-paint benchmarks
 and cross-platform packaged-app checks were not run. The draft PR is a source
@@ -168,3 +168,60 @@ versions, audit rationale, guarded compatibility patch, and future upgrade rules
 - Packaged ASAR inspection verified the runtime modules and IANA snapshot are
   present and build-only tools are excluded. Staged whitespace, sensitive-file,
   credential-pattern, large-file, and generated-binary hygiene checks are clean.
+
+## Approved source merge and release handoff
+
+On 2026-10-03 the user requested merging and deploying the approved work, and
+asked whether to involve the existing build agent. This supersedes the earlier
+source-only approval boundary; it does not authorize replacing the installed app
+or bypassing release verification.
+
+The complete suite passed again (**140/140**, no failures, cancellations, or
+skips), the dev-inclusive audit reported **0 vulnerabilities**, and source CI
+was green. The isolated worktree is the only source of this PR; the saved dirty
+checkout remains untouched.
+
+### Real Electron UI smoke evidence
+
+These checks used Electron 42.11.3 with the extracted unsigned packaged runtime
+and a temporary bootstrap redirecting user data, session data, and logs to a
+disposable directory. They did not use or modify the installed app or its
+profile. This is runtime UI evidence, not acceptance of a final signed installer.
+
+- `lisa.agent` rendered its native HTTP website with `lisa.agent/` visible and
+  the Native HNS HTTP indicator. The original tab remained intact while opening
+  and navigating another tab.
+- Google HTTPS rendered normally with its HTTPS indicator and without a stale
+  HNS profile indicator. New-tab navigation worked.
+- An explicitly entered manifest URL started ordinary HTTPS navigation to that
+  URL; the endpoint returned HTTP 200. The computer-use inspection failed on
+  the raw JSON view, so its rendered body is not claimed as visually verified.
+  Deterministic direct-manifest regressions remain green.
+- Explicit `https://skyinclude/` displayed the internal TLSA Resolver Failure
+  page and its corresponding trust indicator when live TLSA providers failed.
+  Certificate verification was not weakened or bypassed.
+- Bare `skyinclude` and `handshake.mercenary` resolved native A records but their
+  HTTP-to-HTTPS redirects hit `ERR_CERT_AUTHORITY_INVALID`. An isolated source
+  checkout of baseline commit `38f577d` reproduced the `skyinclude` failure with
+  the same certificate rejection. The verifier and default opt-in DANE setting
+  are unchanged by this PR. This inherited redirect/trust UX remains a follow-up,
+  not evidence of a new performance regression.
+- An inert loopback-only POST form submitted successfully. Reload did not
+  visibly confirm a resubmission or produce a second POST, so the manual POST
+  prompt/resubmission case remains unverified. No real form or transaction was
+  submitted. The deterministic reload test confirms use of native reload rather
+  than replacing POST history with a fresh GET navigation.
+
+Source merge is approved; public binary publication still requires signed and
+notarized macOS verification, Windows/Linux packaging and launch checks, and the
+remaining packaged UI acceptance cases (including POST reload, background-tab
+behavior, and a successfully DANE-verified native HTTPS site). A new build should
+use a new patch version, expected `v0.1.24`, from a verified final `main` commit;
+do not rebuild or move the published `v0.1.23` tag.
+
+During UI checks this Mac reported ENOSPC and approximately 239 MiB free. Do not
+start a local installer build or bulk artifact download until adequate storage is
+available. No user files were removed to work around this condition. The temporary
+browser instances were closed after testing. No release workflow, new tag,
+binary publication, app installation, or `/Applications` replacement was performed
+as part of these checks.
