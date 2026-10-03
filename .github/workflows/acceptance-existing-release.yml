@@ -1,0 +1,69 @@
+name: Acceptance of existing v0.1.25 packages
+
+on:
+  push:
+    branches: [codex/release-acceptance-20261003]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Download and verify the existing Windows installer
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download 37106360068 --repo shadstoneofficial/skyinclude-browser --name skyinclude-browser-windows --dir packages
+          $installer = Join-Path $PWD 'packages/SkyInclude-Browser-Setup-0.1.25.exe'
+          if ((Get-FileHash $installer -Algorithm SHA256).Hash.ToLower() -ne '795553b7a356695bf85d5df19bc376929d8e45a48d0990e301f450539f0432ee') { throw 'Installer hash mismatch' }
+          $destination = Join-Path $env:RUNNER_TEMP 'skyinclude-acceptance-install'
+          $process = Start-Process -FilePath $installer -ArgumentList @('/S', "/D=$destination") -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Installer failed: $($process.ExitCode)" }
+          $exe = Join-Path $destination 'SkyInclude Browser.exe'
+          if (!(Test-Path $exe)) { throw 'Installed executable missing' }
+          $env:ACCEPTANCE_EXECUTABLE = $exe
+          $env:ACCEPTANCE_ARTIFACT = 'SkyInclude-Browser-Setup-0.1.25.exe'
+          $env:ACCEPTANCE_SHA256 = '795553b7a356695bf85d5df19bc376929d8e45a48d0990e301f450539f0432ee'
+          node scripts/acceptance/packaged-desktop.cjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-package-launch-evidence
+          path: acceptance-evidence/
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Download and launch existing Linux packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download 37106360068 --repo shadstoneofficial/skyinclude-browser --name skyinclude-browser-ubuntu --dir packages
+          cd packages
+          echo 'e78bfd62b24fcf1503bd129d7289dca90240df59ccede551c9aab6533cc4e82d  SkyInclude-Browser-0.1.25.AppImage' | sha256sum -c
+          echo '368b5b525e15ff1784b4a417e2563b4ec46d91d96b2cdcffd342caa2cd99f650  skyinclude-browser_0.1.25_amd64.deb' | sha256sum -c
+          chmod +x SkyInclude-Browser-0.1.25.AppImage
+          ./SkyInclude-Browser-0.1.25.AppImage --appimage-extract > /dev/null
+          dpkg-deb -x skyinclude-browser_0.1.25_amd64.deb deb-extracted
+          cd ..
+          ACCEPTANCE_EXECUTABLE="$PWD/packages/squashfs-root/AppRun" ACCEPTANCE_OUTPUT="$PWD/acceptance-evidence/appimage" ACCEPTANCE_ARTIFACT='SkyInclude-Browser-0.1.25.AppImage' ACCEPTANCE_SHA256=e78bfd62b24fcf1503bd129d7289dca90240df59ccede551c9aab6533cc4e82d xvfb-run -a node scripts/acceptance/packaged-desktop.cjs
+          ACCEPTANCE_EXECUTABLE="$PWD/packages/deb-extracted/opt/SkyInclude Browser/skyinclude-browser" ACCEPTANCE_OUTPUT="$PWD/acceptance-evidence/deb" ACCEPTANCE_ARTIFACT='skyinclude-browser_0.1.25_amd64.deb' ACCEPTANCE_SHA256=368b5b525e15ff1784b4a417e2563b4ec46d91d96b2cdcffd342caa2cd99f650 xvfb-run -a node scripts/acceptance/packaged-desktop.cjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-package-launch-evidence
+          path: acceptance-evidence/
