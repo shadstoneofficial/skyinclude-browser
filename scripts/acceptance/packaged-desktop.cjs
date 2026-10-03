@@ -81,12 +81,12 @@ async function main() {
   try {
     const shellTarget = await until(async () => (await targets(port)).find(t => t.url.endsWith('/index.html')), 'packaged shell');
     shell = await connect(shellTarget.webSocketDebuggerUrl);
-    report.checks.version = await evaluate(shell, 'window.electronAPI.getAppInfo().then(info => info.version)');
+    report.checks.version = await until(() => evaluate(shell, 'window.electronAPI.getAppInfo().then(info => info.version)'), 'loaded packaged shell context');
     assert.equal(report.checks.version, '0.1.25');
     await evaluate(shell, `(() => {const input=document.querySelector('#address-bar'); if(!input) throw new Error('Address input missing'); input.value=${JSON.stringify(fixtureUrl)}; input.dispatchEvent(new KeyboardEvent('keypress',{key:'Enter',bubbles:true}));})()`);
     const localTarget = await until(async () => (await targets(port)).find(t => t.url.startsWith(fixtureUrl)), 'actual BrowserView navigation');
     content = await connect(localTarget.webSocketDebuggerUrl);
-    assert.match(await evaluate(content, 'document.body.innerText'), /Packaged navigation passed/);
+    await until(async () => /Packaged navigation passed/.test(await evaluate(content, 'document.body.innerText')), 'loaded fixture document');
     report.checks.localNavigation = 'PASS';
     const capture = await content.call('Page.captureScreenshot');
     fs.writeFileSync(path.join(output, 'packaged-navigation.png'), Buffer.from(capture.data, 'base64'));

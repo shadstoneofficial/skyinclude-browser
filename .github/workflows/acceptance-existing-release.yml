@@ -59,7 +59,7 @@ jobs:
           image=$(find . -type f -name '*.AppImage')
           deb=$(find . -type f -name '*.deb')
           mv "$image" SkyInclude-Browser-0.1.25.AppImage
-          mv "$deb" skyinclude-browser_0.1.25_amd64.deb
+          if [ "$deb" != './skyinclude-browser_0.1.25_amd64.deb' ]; then mv "$deb" skyinclude-browser_0.1.25_amd64.deb; fi
           echo 'e78bfd62b24fcf1503bd129d7289dca90240df59ccede551c9aab6533cc4e82d  SkyInclude-Browser-0.1.25.AppImage' | sha256sum -c
           echo '368b5b525e15ff1784b4a417e2563b4ec46d91d96b2cdcffd342caa2cd99f650  skyinclude-browser_0.1.25_amd64.deb' | sha256sum -c
           chmod +x SkyInclude-Browser-0.1.25.AppImage
