@@ -25,9 +25,11 @@ async function connect(url) {
     socket.addEventListener('error', reject, {once: true});
   });
   let sequence = 0;
+  const events = [];
   const waiting = new Map();
   socket.addEventListener('message', event => {
     const message = JSON.parse(event.data);
+    if (message.method) events.push(message);
     const pending = waiting.get(message.id);
     if (!pending) return;
     waiting.delete(message.id);
@@ -35,6 +37,7 @@ async function connect(url) {
     else pending.resolve(message.result);
   });
   return {
+    events,
     call(method, params = {}) {
       const id = ++sequence;
       return new Promise((resolve, reject) => {
@@ -79,7 +82,11 @@ async function main() {
   let content;
   const report = {sourceCommit: '00bfaa8bbb11098d91f2ab9eebe84930feb22cb7', expectedVersion: '0.1.25', platform: process.platform, arch: process.arch, artifact: process.env.ACCEPTANCE_ARTIFACT, sha256: process.env.ACCEPTANCE_SHA256, extraArgs: process.env.ACCEPTANCE_EXTRA_ARGS || '', checks: {}};
   try {
-    const shellTarget = await until(async () => (await targets(port)).find(t => t.url.endsWith('/index.html')), 'packaged shell');
+    const shellTarget = await until(async () => {
+      const list=await targets(port);
+      fs.writeFileSync(path.join(output,'last-targets.json'),JSON.stringify(list,null,2));
+      return list.find(t => /\/index\.html(?:[?#]|$)/.test(t.url));
+    }, 'packaged shell');
     shell = await connect(shellTarget.webSocketDebuggerUrl);
     report.checks.version = await until(() => evaluate(shell, 'window.electronAPI.getAppInfo().then(info => info.version)'), 'loaded packaged shell context');
     assert.equal(report.checks.version, '0.1.25');
