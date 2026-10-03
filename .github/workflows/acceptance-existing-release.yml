@@ -66,7 +66,8 @@ jobs:
           ./SkyInclude-Browser-0.1.25.AppImage --appimage-extract > /dev/null
           cd ..
           ACCEPTANCE_EXECUTABLE="$PWD/packages/squashfs-root/AppRun" ACCEPTANCE_OUTPUT="$PWD/acceptance-evidence/appimage" ACCEPTANCE_ARTIFACT='SkyInclude-Browser-0.1.25.AppImage' ACCEPTANCE_SHA256=e78bfd62b24fcf1503bd129d7289dca90240df59ccede551c9aab6533cc4e82d xvfb-run -a node scripts/acceptance/packaged-desktop.cjs
-          sudo dpkg -i packages/skyinclude-browser_0.1.25_amd64.deb
+          sudo apt-get update
+          sudo apt-get install -y ./packages/skyinclude-browser_0.1.25_amd64.deb
           ACCEPTANCE_EXECUTABLE='/opt/SkyInclude Browser/skyinclude-browser' ACCEPTANCE_OUTPUT="$PWD/acceptance-evidence/deb" ACCEPTANCE_ARTIFACT='skyinclude-browser_0.1.25_amd64.deb' ACCEPTANCE_SHA256=368b5b525e15ff1784b4a417e2563b4ec46d91d96b2cdcffd342caa2cd99f650 xvfb-run -a node scripts/acceptance/packaged-desktop.cjs
       - uses: actions/upload-artifact@v4
         if: always()
