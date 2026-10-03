@@ -109,4 +109,5 @@ async function main() {
     await new Promise(resolve => fixture.close(resolve));
   }
 }
-main().catch(error => {console.error(error); process.exitCode = 1;});
+if (require.main === module) main().catch(error => {console.error(error); process.exitCode = 1;});
+module.exports = {connect, targets, until, evaluate, delay};

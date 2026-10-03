@@ -24,7 +24,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh run download 37106360068 --repo shadstoneofficial/skyinclude-browser --name skyinclude-browser-windows --dir packages
-          $installer = Join-Path $PWD 'packages/SkyInclude-Browser-Setup-0.1.25.exe'
+          $installers = @(Get-ChildItem packages -Recurse -Filter '*.exe')
+          if ($installers.Count -ne 1) { throw 'Expected one original CI installer' }
+          $installer = $installers[0].FullName
           if ((Get-FileHash $installer -Algorithm SHA256).Hash.ToLower() -ne '795553b7a356695bf85d5df19bc376929d8e45a48d0990e301f450539f0432ee') { throw 'Installer hash mismatch' }
           $destination = Join-Path $env:RUNNER_TEMP 'skyinclude-acceptance-install'
           $process = Start-Process -FilePath $installer -ArgumentList @('/S', "/D=$destination") -Wait -PassThru
@@ -54,6 +56,10 @@ jobs:
         run: |
           gh run download 37106360068 --repo shadstoneofficial/skyinclude-browser --name skyinclude-browser-ubuntu --dir packages
           cd packages
+          image=$(find . -type f -name '*.AppImage')
+          deb=$(find . -type f -name '*.deb')
+          mv "$image" SkyInclude-Browser-0.1.25.AppImage
+          mv "$deb" skyinclude-browser_0.1.25_amd64.deb
           echo 'e78bfd62b24fcf1503bd129d7289dca90240df59ccede551c9aab6533cc4e82d  SkyInclude-Browser-0.1.25.AppImage' | sha256sum -c
           echo '368b5b525e15ff1784b4a417e2563b4ec46d91d96b2cdcffd342caa2cd99f650  skyinclude-browser_0.1.25_amd64.deb' | sha256sum -c
           chmod +x SkyInclude-Browser-0.1.25.AppImage
