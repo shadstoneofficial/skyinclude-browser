@@ -92,6 +92,8 @@ class HNSResolver {
 
         this.cache = new Map();
         this.cacheTimeout = 300000;
+        this.pendingResolutions = new Map();
+        this.cacheGeneration = 0;
         this.tlsaCache = new Map();
         this.tlsaCacheTimeout = 300000;
         this.resolverHealth = new Map();
@@ -218,74 +220,172 @@ class HNSResolver {
         });
     }
 
-    async resolveHNSDomain(domain) {
+    createAbortError() {
+        const error = new Error('Resolution cancelled');
+        error.name = 'AbortError';
+        error.code = 'ABORT_ERR';
+        return error;
+    }
+
+    throwIfAborted(signal) {
+        if (signal?.aborted) throw this.createAbortError();
+    }
+
+    getResolutionConfigurationKey() {
+        const settings = this.getResolverSettings();
+        return JSON.stringify([
+            this.cacheGeneration,
+            settings.resolutionMode,
+            settings.timeout,
+            settings.headlessLookupBase,
+            settings.resolvers.map(resolver => this.getResolverKey(resolver))
+        ]);
+    }
+
+    async resolveHNSDomain(domain, options = {}) {
         const cleanDomain = this.normalizeDomain(domain);
         const cacheKey = cleanDomain.toLowerCase();
+        this.throwIfAborted(options.signal);
+        const configurationKey = this.getResolutionConfigurationKey();
         const cached = this.cache.get(cacheKey);
 
-        if (cached && Date.now() - cached.timestamp < this.cacheTimeout) {
+        if (cached && cached.configurationKey === configurationKey
+            && Date.now() - cached.timestamp < this.cacheTimeout) {
             console.log('HNS resolution cache hit');
             return cached.result;
         }
 
+        const pendingKey = `${configurationKey}|${cacheKey}`;
+        let pending = this.pendingResolutions.get(pendingKey);
+        if (!pending) {
+            const controller = new AbortController();
+            pending = { controller, consumers: 0, settled: false };
+            const generation = this.cacheGeneration;
+            pending.promise = this.resolveUncachedDomain(cleanDomain, { signal: controller.signal })
+                .then(result => {
+                    if (result && result.resolutionState !== 'temporary-failure'
+                        && !controller.signal.aborted && generation === this.cacheGeneration) {
+                        this.cache.set(cacheKey, { result, configurationKey, timestamp: Date.now() });
+                    }
+                    return result;
+                }).finally(() => {
+                    pending.settled = true;
+                    if (this.pendingResolutions.get(pendingKey) === pending) {
+                        this.pendingResolutions.delete(pendingKey);
+                    }
+                });
+            this.pendingResolutions.set(pendingKey, pending);
+        }
+
+        return this.joinPendingResolution(pendingKey, pending, options.signal);
+    }
+
+    joinPendingResolution(pendingKey, pending, signal) {
+        pending.consumers += 1;
+        return new Promise((resolve, reject) => {
+            let completed = false;
+            const finish = (error, result) => {
+                if (completed) return;
+                completed = true;
+                signal?.removeEventListener('abort', abort);
+                pending.consumers -= 1;
+                if (error) reject(error);
+                else resolve(result);
+            };
+            const abort = () => {
+                finish(this.createAbortError());
+                // A superseded tab must not cancel another tab's shared lookup.
+                if (!pending.settled && pending.consumers === 0) {
+                    if (this.pendingResolutions.get(pendingKey) === pending) {
+                        this.pendingResolutions.delete(pendingKey);
+                    }
+                    pending.controller.abort();
+                }
+            };
+            signal?.addEventListener('abort', abort, { once: true });
+            pending.promise.then(result => finish(null, result), error => finish(error));
+            if (signal?.aborted) abort();
+        });
+    }
+
+    async resolveUncachedDomain(cleanDomain, options = {}) {
         try {
             let result = null;
             const settings = this.getResolverSettings();
 
             if (this.isHeadlessDomain(cleanDomain)) {
+                let websiteResponse = null;
                 try {
-                    result = await this.resolveHeadlessWebRecords(cleanDomain);
+                    result = await this.resolveHeadlessWebRecords(cleanDomain, {
+                        ...options, onWebAbsence: response => { websiteResponse = response; }
+                    });
                 } catch (error) {
-                    result = await this.buildTemporaryResolutionResult(cleanDomain, error);
+                    if (error.name === 'AbortError') throw error;
+                    result = this.buildTemporaryResolutionResult(cleanDomain, error);
                 }
                 if (!result) {
-                    result = await this.lookupHeadlessDomain(cleanDomain, { websiteAbsent: true });
+                    result = await this.lookupHeadlessDomain(cleanDomain, {
+                        ...options, websiteAbsent: true, websiteResponse
+                    });
                 }
                 if (!result && settings.resolutionMode === 'p2p') {
-                    result = await this.resolveP2P(cleanDomain);
+                    result = await this.resolveP2P(cleanDomain, options);
                 }
             } else if (settings.resolutionMode === 'p2p') {
-                result = await this.resolveP2P(cleanDomain);
+                result = await this.resolveP2P(cleanDomain, options);
             }
 
             if (!result) {
-                result = await this.resolveViaDoh(cleanDomain);
+                result = await this.resolveViaDoh(cleanDomain, options);
             }
 
-            if (result && result.resolutionState !== 'temporary-failure') {
-                this.cache.set(cacheKey, {
-                    result,
-                    timestamp: Date.now()
-                });
-            }
-
+            this.throwIfAborted(options.signal);
             return result;
         } catch (error) {
+            if (error.name === 'AbortError') throw error;
             console.error('HNS resolution failed:', error.message);
             return this.buildTemporaryResolutionResult(cleanDomain, error);
         }
     }
 
-    async resolveHeadlessWebRecords(domain) {
-        return this.resolveWebRecordsOnly(domain);
+    async resolveHeadlessWebRecords(domain, options = {}) {
+        return this.resolveWebRecordsOnly(domain, options);
     }
 
-    async resolveWebRecordsOnly(domain) {
-        const response = await this.queryRecordSet(domain, ['TXT', 'CNAME', 'A', 'AAAA']);
+    async resolveWebRecordsOnly(domain, options = {}) {
+        const response = await this.queryRecordSet(domain, ['A', 'AAAA', 'CNAME'], {
+            ...options, optionalTypes: ['TXT']
+        });
         if (response.rcode === 3) {
+            options.onWebAbsence?.(response);
             return null;
         }
         const records = response.records;
         const hnsProfile = this.parseHnsBioProfile(domain, records.TXT);
 
-        return this.buildAddressResult(domain, records, hnsProfile, response)
+        const result = this.buildAddressResult(domain, records, hnsProfile, response)
             || this.buildCnameResult(domain, records, hnsProfile, response);
+        if (!result) options.onWebAbsence?.(response);
+        return this.attachOptionalProfile(result, domain, response);
+    }
+
+    attachOptionalProfile(result, domain, response) {
+        if (!result || !response.optionalRecordsPromise) return result;
+        const profilePromise = response.optionalRecordsPromise.then(optional => {
+            if (optional.error || optional.rcode !== response.rcode) return result.hnsProfile;
+            result.records.TXT = optional.records.TXT || [];
+            result.hnsProfile = this.parseHnsBioProfile(domain, result.records.TXT);
+            return result.hnsProfile;
+        }).catch(() => result.hnsProfile);
+        // Promises are process-local enrichment, not serializable IPC metadata.
+        Object.defineProperty(result, 'profilePromise', { value: profilePromise, enumerable: false });
+        return result;
     }
 
     normalizeDomain(domain) {
         return String(domain || '')
             .trim()
-            .replace(/^https?:\/\//, '')
+            .replace(/^https?:\/\//i, '')
             .replace(/\/.*$/, '')
             .replace(/\.$/, '')
             .toLowerCase();
@@ -315,18 +415,13 @@ class HNSResolver {
         };
     }
 
-    async fetchHeadlessMetadata(domain) {
+    async fetchHeadlessMetadata(domain, options = {}) {
         const settings = this.getResolverSettings();
         const url = new URL(encodeURIComponent(domain), settings.headlessLookupBase);
-        return this.fetchJson(url.toString(), settings.timeout);
+        return this.fetchJson(url.toString(), settings.timeout, {}, options);
     }
 
-    async buildTemporaryResolutionResult(domain, error) {
-        let data = null;
-        if (this.isHeadlessDomain(domain)) {
-            data = await this.fetchHeadlessMetadata(domain).catch(() => null);
-        }
-
+    buildTemporaryResolutionResult(domain, error) {
         return {
             domain,
             source: 'hns-resolver',
@@ -337,26 +432,32 @@ class HNSResolver {
                 message: error?.message || 'HNS resolution temporarily failed',
                 attempts: Array.isArray(error?.attempts) ? error.attempts : []
             },
-            headlessLinks: this.isHeadlessDomain(domain) ? this.getHeadlessLinks(domain, data || {}) : null,
-            records: data ? { metadata: data } : {}
+            headlessLinks: this.isHeadlessDomain(domain) ? this.getHeadlessLinks(domain) : null,
+            records: {}
         };
     }
 
     async lookupHeadlessDomain(domain, options = {}) {
+        let websiteResponse = options.websiteResponse || null;
         if (options.websiteAbsent !== true) {
             try {
-                const webResult = await this.resolveHeadlessWebRecords(domain);
+                const webResult = await this.resolveHeadlessWebRecords(domain, {
+                    ...options, onWebAbsence: response => { websiteResponse = response; }
+                });
                 if (webResult) {
                     return webResult;
                 }
             } catch (error) {
+                if (error.name === 'AbortError') throw error;
                 return this.buildTemporaryResolutionResult(domain, error);
             }
         }
 
         try {
-            const data = await this.fetchHeadlessMetadata(domain);
-            const hnsProfile = await this.resolveHnsBioProfile(domain).catch(() => null);
+            const data = await this.fetchHeadlessMetadata(domain, options);
+            // Identity metadata is authoritative only after a no-web response.
+            // Its optional TXT profile must not add another network deadline.
+            const hnsProfile = this.parseHnsBioProfile(domain, websiteResponse?.records.TXT || []);
             const manifests = data.manifests || {};
             const profile = data.profile || {};
             const integrations = data.integrations || {};
@@ -364,54 +465,48 @@ class HNSResolver {
             const redirectUrl = manifests.agent_json || manifests.skill_md || profile.url || arpChat.url;
             const headlessLinks = this.getHeadlessLinks(domain, data);
 
-            if (!redirectUrl) {
-                return {
-                    domain,
-                    source: 'headlessdomains',
-                    resolutionState: 'authoritative-absence',
-                    url: `https://headlessdomains.com/${domain}`,
-                    headlessLinks,
-                    hnsProfile,
-                    records: { metadata: data }
-                };
-            }
-
-            return {
+            const result = {
                 domain,
                 source: 'headlessdomains',
                 resolutionState: 'authoritative-absence',
-                url: redirectUrl,
+                url: redirectUrl || `https://headlessdomains.com/${domain}`,
                 headlessLinks,
                 hnsProfile,
-                records: { metadata: data }
+                records: { metadata: data, TXT: websiteResponse?.records.TXT || [] }
             };
+            return websiteResponse ? this.attachOptionalProfile(result, domain, websiteResponse) : result;
         } catch (error) {
+            if (error.name === 'AbortError') throw error;
             console.log('HeadlessDomains lookup failed:', error.message);
             return null;
         }
     }
 
     async resolveViaDoh(domain, options = {}) {
-        const response = await this.queryRecordSet(domain, ['TXT', 'CNAME', 'A', 'AAAA'], options);
+        const response = await this.queryRecordSet(domain, ['A', 'AAAA', 'CNAME'], {
+            ...options, optionalTypes: ['TXT']
+        });
         if (response.rcode === 3) {
             return null;
         }
         const records = response.records;
         const hnsProfile = this.parseHnsBioProfile(domain, records.TXT);
-
-        if (options.preferWebRecords) {
-            const addressResult = this.buildAddressResult(domain, records, hnsProfile, response);
-            if (addressResult) {
-                return addressResult;
-            }
-
-            const cnameResult = this.buildCnameResult(domain, records, hnsProfile, response);
-            if (cnameResult) {
-                return cnameResult;
-            }
-
-            return null;
+        const webResult = this.buildAddressResult(domain, records, hnsProfile, response)
+            || this.buildCnameResult(domain, records, hnsProfile, response);
+        if (webResult) {
+            return this.attachOptionalProfile(webResult, domain, response);
         }
+
+        if (options.preferWebRecords) return null;
+        // TXT redirects remain supported only after authoritative web absence,
+        // and come from the same endpoint rather than another operator's root.
+        const optional = await response.optionalRecordsPromise;
+        if (optional.error) throw optional.error;
+        if (optional.rcode !== response.rcode) {
+            throw new Error('Inconsistent DNS status between website and TXT records');
+        }
+        records.TXT = optional.records.TXT;
+        const txtProfile = this.parseHnsBioProfile(domain, records.TXT);
 
         const redirectUrl = this.findUrlInTxt(records.TXT);
         if (redirectUrl) {
@@ -419,26 +514,16 @@ class HNSResolver {
                 domain,
                 ...this.getResolutionMetadata(response),
                 url: redirectUrl,
-                hnsProfile,
+                hnsProfile: txtProfile,
                 records
             };
-        }
-
-        const cnameResult = this.buildCnameResult(domain, records, hnsProfile, response);
-        if (cnameResult) {
-            return cnameResult;
-        }
-
-        const addressResult = this.buildAddressResult(domain, records, hnsProfile, response);
-        if (addressResult) {
-            return addressResult;
         }
 
         if (records.TXT.length > 0) {
             return {
                 domain,
                 ...this.getResolutionMetadata(response),
-                hnsProfile,
+                hnsProfile: txtProfile,
                 records
             };
         }
@@ -548,6 +633,9 @@ class HNSResolver {
 
         const settings = this.getResolverSettings();
         const timeout = options.timeout || settings.timeout;
+        this.throwIfAborted(options.signal);
+        const optionalTypes = [...new Set(options.optionalTypes || [])]
+            .filter(type => DNS_TYPES[type] && !requestedTypes.includes(type));
         const candidateState = this.getResolverCandidateState(options);
         const attempts = candidateState.cooling.map(candidate => ({
             resolver: this.getPublicResolverInfo(candidate.resolver),
@@ -567,10 +655,35 @@ class HNSResolver {
         for (const candidate of candidateState.available) {
             const { resolver, configuredIndex } = candidate;
             const startedAt = Date.now();
+            const controller = new AbortController();
+            const abort = () => controller.abort();
+            options.signal?.addEventListener('abort', abort, { once: true });
+            let optionalRecordsPromise = null;
             try {
+                this.throwIfAborted(options.signal);
+                let optionalRecords = null;
+                if (optionalTypes.length) {
+                    // Always observe optional failures, even after a native
+                    // website has already returned to its consumers.
+                    optionalRecordsPromise = Promise.all(optionalTypes.map(typeName =>
+                        this.queryResolver(resolver, cleanDomain, typeName, timeout, { signal: controller.signal })
+                    )).then(responses => {
+                        const rcodes = new Set(responses.map(response => response.rcode));
+                        const rcode = responses[0]?.rcode ?? 0;
+                        if (rcodes.size > 1 || (rcode !== 0 && rcode !== 3)) {
+                            throw this.createDnsResponseError(rcode);
+                        }
+                        optionalRecords = {
+                            records: Object.fromEntries(optionalTypes.map((type, index) => [type, responses[index].records])),
+                            rcode
+                        };
+                        return optionalRecords;
+                    }).catch(error => ({ error, records: {}, rcode: null }));
+                }
                 const responses = await Promise.all(requestedTypes.map(typeName =>
-                    this.queryResolver(resolver, cleanDomain, typeName, timeout)
+                    this.queryResolver(resolver, cleanDomain, typeName, timeout, { signal: controller.signal })
                 ));
+                this.throwIfAborted(options.signal);
                 const rcodes = new Set(responses.map(response => response.rcode));
                 if (rcodes.size > 1) {
                     throw new Error(`Inconsistent DNS status across record types: ${[...rcodes].map(code => this.getRcodeName(code)).join(', ')}`);
@@ -581,10 +694,11 @@ class HNSResolver {
                     throw this.createDnsResponseError(rcode);
                 }
 
-                const records = Object.fromEntries(requestedTypes.map(type => [type, []]));
+                const records = Object.fromEntries([...requestedTypes, ...optionalTypes].map(type => [type, []]));
                 responses.forEach((response, responseIndex) => {
                     records[requestedTypes[responseIndex]] = response.records;
                 });
+                if (optionalRecords?.rcode === rcode) Object.assign(records, optionalRecords.records);
                 const elapsedMs = Date.now() - startedAt;
                 this.markResolverSuccess(resolver, elapsedMs, this.getRcodeName(rcode), configuredIndex);
                 attempts.push({
@@ -601,9 +715,13 @@ class HNSResolver {
                     resolver,
                     fallbackCount: configuredIndex,
                     elapsedMs,
-                    attempts: attempts.sort((left, right) => left.configuredIndex - right.configuredIndex)
+                    attempts: attempts.sort((left, right) => left.configuredIndex - right.configuredIndex),
+                    optionalRecordsPromise
                 };
             } catch (error) {
+                // Failover abandons all siblings for the failed endpoint.
+                controller.abort();
+                if (error.name === 'AbortError' || options.signal?.aborted) throw this.createAbortError();
                 const elapsedMs = Date.now() - startedAt;
                 this.markResolverFailure(resolver, error, elapsedMs);
                 attempts.push({
@@ -614,6 +732,12 @@ class HNSResolver {
                     message: error.message
                 });
                 failures.push(`${resolver.id}: ${error.message}`);
+            } finally {
+                if (optionalRecordsPromise) {
+                    optionalRecordsPromise.then(() => options.signal?.removeEventListener('abort', abort));
+                } else {
+                    options.signal?.removeEventListener('abort', abort);
+                }
             }
         }
 
@@ -623,15 +747,15 @@ class HNSResolver {
         throw error;
     }
 
-    async queryResolver(resolverInput, domain, typeName, timeout) {
+    async queryResolver(resolverInput, domain, typeName, timeout, options = {}) {
         const resolver = normalizeResolverDescriptor(resolverInput);
         if (!resolver) {
             throw new Error('Invalid resolver configuration');
         }
         if (resolver.transport === 'dns-json') {
-            return this.queryDnsJson(resolver, domain, typeName, timeout);
+            return this.queryDnsJson(resolver, domain, typeName, timeout, options);
         }
-        return this.queryDohResponse(resolver.url, domain, typeName, timeout);
+        return this.queryDohResponse(resolver.url, domain, typeName, timeout, options);
     }
 
     async queryDoh(resolverUrl, domain, typeName, timeout) {
@@ -642,7 +766,7 @@ class HNSResolver {
         return response.records;
     }
 
-    async queryDohResponse(resolverUrl, domain, typeName, timeout) {
+    async queryDohResponse(resolverUrl, domain, typeName, timeout, options = {}) {
         const resolver = this.normalizeDohResolver(resolverUrl);
         if (!resolver) {
             throw new Error(`Invalid DoH resolver: ${resolverUrl}`);
@@ -657,7 +781,7 @@ class HNSResolver {
         const buffer = await this.fetchBuffer(url.toString(), timeout, {
             Accept: 'application/dns-message',
             'User-Agent': 'SkyInclude/1.0.0'
-        });
+        }, { ...options, maxBytes: 65535 });
 
         return this.parseDnsResponseMessage(buffer, typeName, {
             id: query.readUInt16BE(0),
@@ -666,7 +790,7 @@ class HNSResolver {
         });
     }
 
-    async queryDnsJson(resolverInput, domain, typeName, timeout) {
+    async queryDnsJson(resolverInput, domain, typeName, timeout, options = {}) {
         const resolver = normalizeResolverDescriptor(resolverInput);
         if (!resolver || resolver.transport !== 'dns-json') {
             throw new Error('Invalid DNS JSON resolver');
@@ -681,7 +805,7 @@ class HNSResolver {
         const data = await this.fetchJson(url.toString(), timeout, {
             Accept: 'application/dns-json',
             'User-Agent': 'SkyInclude/1.0.0'
-        });
+        }, { ...options, maxBytes: 262144 });
         return this.parseDnsJsonResponse(data, domain, typeName);
     }
 
@@ -1036,13 +1160,16 @@ class HNSResolver {
             return cached.records;
         }
 
+        const generation = this.cacheGeneration;
         const response = await this.queryRecordSet(tlsaName, ['TLSA'], options);
         const records = response.rcode === 3 ? [] : response.records.TLSA;
-        this.tlsaCache.set(cacheKey, {
-            records,
-            resolver: this.getPublicResolverInfo(response.resolver),
-            timestamp: Date.now()
-        });
+        if (generation === this.cacheGeneration) {
+            this.tlsaCache.set(cacheKey, {
+                records,
+                resolver: this.getPublicResolverInfo(response.resolver),
+                timestamp: Date.now()
+            });
+        }
         return records;
     }
 
@@ -1123,12 +1250,12 @@ class HNSResolver {
         return null;
     }
 
-    async fetchJson(url, timeout, headers = {}) {
+    async fetchJson(url, timeout, headers = {}, options = {}) {
         const buffer = await this.fetchBuffer(url, timeout, {
             Accept: 'application/json',
             'User-Agent': 'SkyInclude/1.0.0',
             ...headers
-        });
+        }, options);
         try {
             return JSON.parse(buffer.toString('utf8'));
         } catch (error) {
@@ -1136,42 +1263,103 @@ class HNSResolver {
         }
     }
 
-    fetchBuffer(url, timeout, headers = {}) {
+    fetchBuffer(url, timeout, headers = {}, options = {}) {
         return new Promise((resolve, reject) => {
             const parsedUrl = new URL(url);
+            if (!['https:', 'http:'].includes(parsedUrl.protocol)) {
+                reject(new Error('Unsupported HTTP request protocol'));
+                return;
+            }
+            if (options.signal?.aborted) {
+                reject(this.createAbortError());
+                return;
+            }
             const client = parsedUrl.protocol === 'https:' ? https : http;
-            const request = client.get(parsedUrl, { headers }, response => {
-                const chunks = [];
-
-                response.on('data', chunk => chunks.push(chunk));
-                response.on('end', () => {
-                    const buffer = Buffer.concat(chunks);
-                    if (response.statusCode < 200 || response.statusCode >= 300) {
-                        const error = new Error(`HTTP ${response.statusCode}: ${buffer.toString('utf8').slice(0, 120)}`);
-                        error.code = `HTTP_${response.statusCode}`;
-                        reject(error);
+            const deadlineMs = Number.isFinite(Number(timeout)) && Number(timeout) > 0
+                ? Number(timeout) : this.getResolverSettings().timeout;
+            const maxBytes = options.maxBytes || 1048576;
+            let request = null;
+            let response = null;
+            let settled = false;
+            const finish = (error, buffer) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(deadline);
+                options.signal?.removeEventListener('abort', abort);
+                if (error) {
+                    request?.destroy();
+                    response?.destroy();
+                    reject(error);
+                } else resolve(buffer);
+            };
+            const abort = () => finish(this.createAbortError());
+            const deadline = setTimeout(() => {
+                const error = new Error('Request deadline exceeded');
+                error.code = 'REQUEST_TIMEOUT';
+                finish(error);
+            }, deadlineMs);
+            options.signal?.addEventListener('abort', abort, { once: true });
+            const tooLarge = () => {
+                const error = new Error(`Response exceeds ${maxBytes} bytes`);
+                error.code = 'RESPONSE_TOO_LARGE';
+                finish(error);
+            };
+            try {
+                request = client.get(parsedUrl, { headers }, incoming => {
+                    response = incoming;
+                    const chunks = [];
+                    let receivedBytes = 0;
+                    response.on('error', error => finish(error));
+                    response.on('aborted', () => {
+                        const error = new Error('Response aborted before completion');
+                        error.code = 'RESPONSE_ABORTED';
+                        finish(error);
+                    });
+                    response.on('close', () => {
+                        if (!response.complete && !settled) {
+                            const error = new Error('Response closed before completion');
+                            error.code = 'RESPONSE_ABORTED';
+                            finish(error);
+                        }
+                    });
+                    if (Number(response.headers['content-length']) > maxBytes) {
+                        tooLarge();
                         return;
                     }
-                    resolve(buffer);
-                });
-            });
 
-            request.on('error', reject);
-            request.setTimeout(timeout, () => {
-                const error = new Error('Request timeout');
-                error.code = 'REQUEST_TIMEOUT';
-                request.destroy(error);
-            });
+                    response.on('data', chunk => {
+                        receivedBytes += chunk.length;
+                        if (receivedBytes > maxBytes) tooLarge();
+                        else if (!settled) chunks.push(chunk);
+                    });
+                    response.on('end', () => {
+                        if (settled) return;
+                        const buffer = Buffer.concat(chunks);
+                        if (response.statusCode < 200 || response.statusCode >= 300) {
+                            const error = new Error(`HTTP ${response.statusCode}: ${buffer.toString('utf8').slice(0, 120)}`);
+                            error.code = `HTTP_${response.statusCode}`;
+                            finish(error);
+                            return;
+                        }
+                        finish(null, buffer);
+                    });
+                });
+
+                request.on('error', error => finish(error));
+                if (options.signal?.aborted) abort();
+            } catch (error) {
+                finish(error);
+            }
         });
     }
 
-    async resolveAPI(domain) {
-        return this.resolveHNSDomain(domain);
+    async resolveAPI(domain, options = {}) {
+        return this.resolveHNSDomain(domain, options);
     }
 
-    async resolveP2P(domain) {
+    async resolveP2P(domain, options = {}) {
         console.log('P2P HNS resolution not implemented, using public DoH');
-        return this.resolveViaDoh(this.normalizeDomain(domain));
+        return this.resolveViaDoh(this.normalizeDomain(domain), options);
     }
 
     async verifyDANE(domain, certificate, options = {}) {
@@ -1283,6 +1471,7 @@ class HNSResolver {
     }
 
     clearCache() {
+        this.cacheGeneration += 1;
         this.cache.clear();
         this.tlsaCache.clear();
         this.resolverHealth.clear();
@@ -1308,7 +1497,7 @@ const resolver = new HNSResolver();
 
 module.exports = {
     HNSResolver,
-    resolveHNSDomain: domain => resolver.resolveHNSDomain(domain),
+    resolveHNSDomain: (domain, options) => resolver.resolveHNSDomain(domain, options),
     verifyDANE: (domain, cert) => resolver.verifyDANE(domain, cert),
     checkTraditionalDNS: domain => resolver.checkTraditionalDNS(domain),
     updateSettings: settings => resolver.updateSettings(settings),

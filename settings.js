@@ -14,7 +14,7 @@ class SettingsManager {
         this.settingsFile = path.join(app.getPath('userData'), 'settings.json');
         this.defaultSettings = {
             // HNS Resolution
-            hnsResolutionMode: 'doh', // 'doh' (DNS-over-HTTPS) or 'p2p' (Light Client)
+            hnsResolutionMode: 'doh', // DNS-over-HTTPS; no bundled P2P client yet.
             hnsResolvers: normalizeResolverList(BUILT_IN_RESOLVERS),
             hnsResolverDefaultsVersion: HNS_RESOLVER_DEFAULTS_VERSION,
             hnsCustomResolver: '',
@@ -176,7 +176,7 @@ class SettingsManager {
         
         // Validate HNS resolution mode
         if (settings.hnsResolutionMode && ['api', 'dns', 'doh', 'p2p'].includes(settings.hnsResolutionMode)) {
-            validated.hnsResolutionMode = settings.hnsResolutionMode;
+            validated.hnsResolutionMode = 'doh';
         }
         
         // Validate boolean settings

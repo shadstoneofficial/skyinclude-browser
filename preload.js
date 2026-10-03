@@ -40,6 +40,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     goBack: (tabId) => ipcRenderer.invoke('go-back', tabId),
     goForward: (tabId) => ipcRenderer.invoke('go-forward', tabId),
     reload: (tabId) => ipcRenderer.invoke('reload', tabId),
+    stopLoading: (tabId) => ipcRenderer.invoke('stop-loading', tabId),
     
     // Tab management
     newTab: (url) => ipcRenderer.invoke('new-tab', url),

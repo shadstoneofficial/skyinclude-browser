@@ -17,7 +17,8 @@
     "dist-win": "electron-builder --win --publish=never",
     "dist-linux": "electron-builder --linux --publish=never",
     "pack": "electron-builder --dir",
-    "check": "node --check main.js && node --check preload.js && node --check renderer.js && node --check resolver.js && node --check resolver-config.js && node --check navigation-policy.js && node --check settings.js && node --check history.js && node --check hns-tls.js && node --check profile-utils.js",
+    "benchmark:resolver": "node scripts/benchmark-resolver.js",
+    "check": "node --check main.js && node --check preload.js && node --check renderer.js && node --check resolver.js && node --check resolver-config.js && node --check navigation-policy.js && node --check settings.js && node --check history.js && node --check hns-tls.js && node --check profile-utils.js && node --check address-input.js && node --check async-log.js && node --check scripts/update-icann-tlds.js && node --check scripts/benchmark-resolver.js",
     "test": "npm run check && node --test tests/*.test.js"
   },
   "keywords": [
@@ -47,6 +48,8 @@
       "resolver.js",
       "resolver-config.js",
       "navigation-policy.js",
+      "address-input.js",
+      "async-log.js",
       "hns-tls.js",
       "profile-utils.js",
       "history.js",

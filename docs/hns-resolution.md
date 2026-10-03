@@ -17,13 +17,69 @@ SkyInclude supports two HTTPS resolver transports:
 - `doh-wire`: RFC 8484-style DNS wire messages sent over HTTPS.
 - `dns-json`: HTTPS APIs that return a DNS JSON response, including Web3DNS.
 
-Resolver settings are ordered. SkyInclude asks one endpoint for the complete logical record set (A, AAAA, CNAME, and TXT) and uses the next endpoint only when the current one has a transport failure, TLS/HTTP error, malformed response, DNS failure status such as `SERVFAIL`, or inconsistent status across record types. It does not merge answers from different operators.
+Resolver settings are ordered. SkyInclude asks one endpoint for A, AAAA, and CNAME and starts an optional TXT query alongside them. The website decision waits for a consistent authoritative status across the three web record types, but a valid native website does not wait for TXT/profile metadata. Late TXT can enrich the profile indicator and cache without changing the chosen website. TXT redirects remain available for ordinary HNS names only after authoritative absence of web records. Optional TXT from a failed endpoint cannot be mixed into the winning endpoint's result.
+
+SkyInclude uses the next endpoint only when the critical web queries have a transport failure, TLS/HTTP error, malformed response, DNS failure status such as `SERVFAIL`, or inconsistent status across record types. An optional TXT failure does not invalidate a valid website. It does not merge answers from different operators.
 
 Authoritative `NXDOMAIN` and successful `NOERROR` with no records are terminal answers for that lookup. This prevents a fallback resolver with a different collision policy or stale root view from silently replacing an authoritative result.
 
 These authoritative answers are distinct from temporary resolver failures. A timeout, transport or TLS/HTTP error, rate limit, `SERVFAIL`, malformed response, or the local resolver cooldown means that SkyInclude does not know whether web records exist. It must not convert that uncertainty into an identity fallback or cache it as a website result. Instead, the browser shows an internal “Native website temporarily unavailable” page with Retry and explicit links for native HTTP and, when applicable, HeadlessDomains profile, actions, and manifest views.
 
 After an endpoint failure, an in-memory circuit breaker skips it for 30 seconds. This prevents every navigation from paying the full timeout while a community resolver is offline. Changing resolver settings or clearing the resolver cache resets this local health state.
+
+### Deadlines, shared work, and caching
+
+Concurrent lookups for the same normalized hostname and resolver configuration
+share one pending resolution. Cancelling one tab removes only that consumer;
+underlying DNS requests are aborted when no pending consumer needs them. Each
+network query has an absolute deadline starting before connection establishment,
+not just a socket-inactivity timeout. Response bodies are bounded: 65,535 bytes
+for binary DNS, 256 KiB for DNS JSON, and 1 MiB for identity metadata. Fallback
+endpoints may consume additional per-query deadlines.
+
+A website is returned as soon as the critical web-record queries finish.
+Optional TXT enrichment can finish after the website lookup's consumers settle;
+it remains deadline-bounded, and its UI update is guarded by the current tab,
+navigation identity, and hostname. Resolver outages return canonical identity
+links immediately without waiting for HeadlessDomains metadata. Transient
+failures are never cached. Clearing caches prevents older in-flight website or
+TLSA answers from repopulating them.
+
+Native HNS HTTP navigations retain Chromium's normal HTTP caching behavior.
+Loading a native site does not clear the shared session cache or force no-cache
+headers. The explicit Clear Cache and Reload command still clears page and
+resolver caches. Ordinary Reload uses Chromium reload semantics, including POST
+resubmission behavior; reloading an internal outage page retries resolution.
+
+The loopback proxy limits connection work and the post-upload wait for initial
+response headers to 15 seconds each, and HTTP stream inactivity to 60 seconds.
+An active upload is not subject to the connection/header deadline. It does not impose a total-duration deadline on
+downloads/media or an established CONNECT tunnel. Client disconnects cancel
+pending resolution and upstream sockets. Native Host headers include an explicit
+non-default port; TLS SNI still uses the native hostname.
+
+### Offline ICANN/HNS classification
+
+`assets/icann-tlds.json` contains the official IANA TLD list with source/version
+metadata. Classification needs no runtime network request. Multi-label names
+under delegated ICANN suffixes use ordinary DNS/WebPKI, including `.shop`,
+`.online`, `.finance`, and `.photography`. DNS names are normalized for case,
+trailing root dots, and IDNA; IP literals are handled separately.
+
+For compatibility, single-label roots and explicit HNS namespace hints
+(`hns`, `agent`, `chatbot`, `nb`, `sats`, `blockchain`, `crypto`, `mercenary`,
+`bit`, `coin`, `wallet`) retain the native HNS route. A future collision for one
+of those hints requires an explicit policy change; updating the IANA snapshot
+alone cannot silently move an existing HNS namespace to ICANN.
+
+Refresh and review the snapshot with `node scripts/update-icann-tlds.js`.
+Use `node scripts/update-icann-tlds.js --check` for a read-only comparison with
+the current official list. Normal tests validate the bundled snapshot offline.
+
+Address-bar multi-word text is searched using the configured HTTPS search engine
+(`%s` placeholder or legacy query prefix). Single words remain native HNS roots;
+`? term` explicitly searches a single word. Direct URLs, including manifest
+URLs, remain direct navigation. New tabs use the configured homepage.
 
 ### Settings format
 

@@ -15,6 +15,13 @@ Before opening a pull request, run:
 npm test
 ```
 
+For repeatable offline resolver performance probes, run
+`npm run benchmark:resolver`. This measures shared DNS work, optional TXT
+latency, and absolute deadlines; it is not a full-browser rendering benchmark.
+The bundled ICANN classification list can be compared with upstream using
+`node scripts/update-icann-tlds.js --check`. Refresh it with
+`node scripts/update-icann-tlds.js` and review the provenance/data diff.
+
 ## Pull Request Guidelines
 
 - Keep changes focused and explain the user-visible behavior.
@@ -33,4 +40,3 @@ Please test these before merging resolver or navigation changes:
 - `handshake.mastermind/schedule/`
 - `janice.agent`
 - `google.com`
-
