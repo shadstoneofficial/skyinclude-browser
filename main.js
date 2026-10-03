@@ -11,6 +11,8 @@ const SettingsManager = require('./settings.js');
 const { HNSResolver } = require('./resolver.js');
 const { inspectHnsHttpsCertificate } = require('./hns-tls.js');
 const { CATEGORY_META, sanitizeHnsProfile } = require('./profile-utils.js');
+const { resolveAddressInput } = require('./address-input.js');
+const { AsyncLogWriter } = require('./async-log.js');
 const {
     buildNativeHnsHttpNavigation,
     buildTemporaryResolutionActions,
@@ -33,6 +35,8 @@ class SkyIncludeBrowser {
         this.hnsProxyHosts = new Map();
         this.hnsProxyPort = null;
         this.hnsProxyServer = null;
+        this.proxyConnectionTimeoutMs = 15000;
+        this.proxyIdleTimeoutMs = 60000;
         this.statusBarVisible = false;
         this.daneVerifiedCertificates = new Map();
         this.daneTrustTtlMs = 5 * 60 * 1000;
@@ -52,6 +56,7 @@ class SkyIncludeBrowser {
         ]);
         this.appVersion = app.getVersion();
         this.logFile = path.join(app.getPath('userData'), 'skyinclude-debug.log');
+        this.logWriter = new AsyncLogWriter({ filePath: this.logFile });
         this.log('app-started', {
             version: this.appVersion,
             platform: process.platform,
@@ -65,9 +70,6 @@ class SkyIncludeBrowser {
         // Disable telemetry and analytics
         app.setAppUserModelId('com.skyinclude.browser');
         app.commandLine.appendSwitch('--disable-features', 'MediaRouter');
-        app.commandLine.appendSwitch('--disable-background-timer-throttling');
-        app.commandLine.appendSwitch('--disable-backgrounding-occluded-windows');
-        app.commandLine.appendSwitch('--disable-renderer-backgrounding');
         app.commandLine.appendSwitch('--disable-component-update');
         app.commandLine.appendSwitch('--disable-default-apps');
         app.commandLine.appendSwitch('--disable-extensions');
@@ -116,11 +118,12 @@ class SkyIncludeBrowser {
         this.mainWindow.on('closed', () => this.closeHnsProfilePopover());
 
         // Create initial tab with home page
-        await this.createNewTab('skyinclude://home');
+        await this.createNewTab();
 
     }
 
-    async createNewTab(url = 'skyinclude://home') {
+    async createNewTab(url) {
+        url = this.validateNavigationInput(url, this.settingsManager.getSetting('homepage') || 'skyinclude://home');
         const tabId = ++this.tabCounter;
         
         const view = new BrowserView({
@@ -130,7 +133,9 @@ class SkyIncludeBrowser {
                 enableRemoteModule: false,
                 webSecurity: true,
                 allowRunningInsecureContent: false,
-                experimentalFeatures: false
+                experimentalFeatures: false,
+                javascript: this.settingsManager.getSetting('enableJavaScript') !== false,
+                backgroundThrottling: true
             }
         });
 
@@ -206,6 +211,8 @@ class SkyIncludeBrowser {
         view.webContents.on('did-finish-load', () => {
             this.updateTabTitle(tabId, view.webContents.getTitle());
         });
+        view.webContents.on('did-start-loading', () => this.syncTabLoading(tabId));
+        view.webContents.on('did-stop-loading', () => this.syncTabLoading(tabId));
 
         this.tabs.set(tabId, {
             id: tabId,
@@ -631,6 +638,8 @@ class SkyIncludeBrowser {
         const tab = this.tabs.get(tabId);
         if (!tab) return;
 
+        tab.navigationAbortController?.abort();
+
         if (tab.view === this.currentView) {
             this.mainWindow.removeBrowserView(this.currentView);
             this.currentView = null;
@@ -656,7 +665,20 @@ class SkyIncludeBrowser {
         const tab = this.tabs.get(tabId);
         if (!tab) return;
 
+        tab.navigationAbortController?.abort();
+        tab.view.webContents.stop();
+        const controller = new AbortController();
+        const navigationToken = Symbol('navigation');
+        tab.navigationAbortController = controller;
+        tab.navigationToken = navigationToken;
+        delete tab.pendingLoadUrl;
+        delete tab.pendingHttpsAvailabilityCheck;
+        const isCurrent = () => this.tabs.get(tabId) === tab &&
+            tab.navigationToken === navigationToken && !controller.signal.aborted;
+
         try {
+            tab.requestedUrl = inputUrl;
+            tab.resolving = true;
             tab.loading = true;
             tab.hostingProvider = null;
             tab.hnsProfile = null;
@@ -674,7 +696,8 @@ class SkyIncludeBrowser {
                 tab.securityInfo = this.buildSecurityInfo('local-home');
             } else {
                 // Check if it's an HNS domain or needs resolution
-                const resolved = await this.resolveUrl(inputUrl);
+                const resolved = await this.resolveUrl(inputUrl, { signal: controller.signal });
+                if (!isCurrent()) return;
                 finalUrl = resolved.url || resolved;
                 loadOptions = resolved.options || {};
                 tab.displayUrl = resolved.displayUrl || inputUrl;
@@ -682,6 +705,8 @@ class SkyIncludeBrowser {
                 tab.hnsProfile = resolved.hnsProfile || null;
                 tab.securityInfo = resolved.securityInfo || null;
                 tab.pendingHttpsAvailabilityCheck = resolved.httpsAvailabilityCheck || null;
+                this.attachDeferredProfile(tab, resolved.profilePromise, navigationToken,
+                    resolved.proxyHost || this.getHostnameForDisplayUrl(resolved.displayUrl || inputUrl));
 
                 if (resolved.proxyHost && resolved.resolvedHost) {
                     this.hnsProxyHosts.set(resolved.proxyHost, resolved.resolvedHost);
@@ -690,15 +715,6 @@ class SkyIncludeBrowser {
                         proxyHost: resolved.proxyHost,
                         resolvedHost: resolved.resolvedHost
                     });
-                }
-
-                if (resolved.bypassCache) {
-                    await tab.view.webContents.session.clearCache();
-                    loadOptions.extraHeaders = [
-                        loadOptions.extraHeaders || '',
-                        'Cache-Control: no-cache',
-                        'Pragma: no-cache'
-                    ].filter(Boolean).join('\r\n');
                 }
 
                 if (resolved.hnsHostHeader && resolved.resolvedHost) {
@@ -713,6 +729,7 @@ class SkyIncludeBrowser {
                 }
             }
 
+            tab.resolving = false;
             tab.url = tab.displayUrl || inputUrl;
             tab.title = this.getFallbackTitleForUrl(tab.url);
             this.sendTabUpdated(tab);
@@ -720,7 +737,9 @@ class SkyIncludeBrowser {
             this.log('load-url', { tabId, inputUrl, finalUrl, loadOptions });
             tab.pendingLoadUrl = finalUrl;
             await tab.view.webContents.loadURL(finalUrl, loadOptions);
+            if (!isCurrent()) return;
             delete tab.pendingLoadUrl;
+            tab.resolving = false;
             
             tab.url = tab.displayUrl || inputUrl; // Keep original URL for display
             this.updateTabTitle(tabId, tab.view.webContents.getTitle());
@@ -757,6 +776,8 @@ class SkyIncludeBrowser {
             this.addToHistory(tab.url, this.getHistoryTitle(tab), tab.favicon);
 
         } catch (error) {
+            if (!isCurrent()) return;
+            tab.resolving = false;
             delete tab.pendingLoadUrl;
             this.log('load-error', { tabId, inputUrl, message: error.message, code: error.code });
             if (this.isExpectedNavigationAbort(error)) {
@@ -766,6 +787,7 @@ class SkyIncludeBrowser {
             }
             console.error('Failed to load URL:', error);
             tab.loading = false;
+            this.mainWindow.webContents.send('loading-changed', { tabId, loading: false, url: tab.url });
             this.mainWindow.webContents.send('loading-error', { 
                 tabId, 
                 error: error.message,
@@ -774,18 +796,89 @@ class SkyIncludeBrowser {
         }
     }
 
+    attachDeferredProfile(tab, profilePromise, navigationToken, expectedHostname) {
+        if (!profilePromise) return;
+        Promise.resolve(profilePromise).then(profile => {
+            if (!profile || this.tabs.get(tab.id) !== tab || tab.navigationToken !== navigationToken ||
+                tab.navigationAbortController?.signal.aborted ||
+                this.getHostnameForDisplayUrl(tab.url) !== expectedHostname) return;
+            tab.hnsProfile = profile;
+            this.sendTabUpdated(tab);
+        }).catch(error => {
+            this.log('hns-profile-metadata-error', { message: error.message });
+        });
+    }
+
+    stopTabLoading(tabId) {
+        const tab = this.tabs.get(tabId);
+        if (!tab) return;
+        tab.navigationAbortController?.abort();
+        tab.view.webContents.stop();
+        delete tab.pendingLoadUrl;
+        delete tab.pendingHttpsAvailabilityCheck;
+        tab.resolving = false;
+        tab.loading = false;
+        this.mainWindow.webContents.send('loading-changed', {
+            tabId, loading: false, url: tab.url,
+            canGoBack: tab.view.webContents.canGoBack(),
+            canGoForward: tab.view.webContents.canGoForward(),
+            hostingProvider: tab.hostingProvider, hnsProfile: tab.hnsProfile,
+            securityInfo: tab.securityInfo
+        });
+        this.sendTabUpdated(tab);
+    }
+
+    syncTabLoading(tabId) {
+        const tab = this.tabs.get(tabId);
+        if (!tab) return;
+        tab.loading = Boolean(tab.resolving || tab.view.webContents.isLoading());
+        this.mainWindow.webContents.send('loading-changed', {
+            tabId, loading: tab.loading, url: tab.url,
+            canGoBack: tab.view.webContents.canGoBack(),
+            canGoForward: tab.view.webContents.canGoForward(),
+            hostingProvider: tab.hostingProvider, hnsProfile: tab.hnsProfile,
+            securityInfo: tab.securityInfo
+        });
+        this.sendTabUpdated(tab);
+    }
+
+    traverseTabHistory(tabId, direction) {
+        const tab = this.tabs.get(tabId);
+        if (!tab || !tab.view.webContents[direction === 'back' ? 'canGoBack' : 'canGoForward']()) return;
+        this.stopTabLoading(tabId);
+        tab.navigationToken = Symbol('history-navigation');
+        tab.navigationAbortController = new AbortController();
+        tab.view.webContents[direction === 'back' ? 'goBack' : 'goForward']();
+    }
+
+    getTabIdForWebContents(webContents) {
+        return Array.from(this.tabs.values()).find(tab => tab.view.webContents === webContents)?.id;
+    }
+
+    reloadTab(tabId) {
+        const tab = this.tabs.get(tabId);
+        if (!tab) return;
+        if (tab.resolving || tab.view.webContents.getURL().startsWith('data:')) {
+            return this.loadUrlInTab(tabId, tab.resolving ? tab.requestedUrl : tab.url);
+        }
+        this.stopTabLoading(tabId);
+        tab.navigationToken = Symbol('reload');
+        tab.navigationAbortController = new AbortController();
+        tab.view.webContents.reload();
+    }
+
     isExpectedNavigationAbort(error) {
         return error && String(error.message || '').includes('ERR_ABORTED');
     }
 
-    async resolveUrl(input) {
+    async resolveUrl(input, options = {}) {
         // Normalize input
-        let url = this.normalizeGatewayUrl(input.trim());
+        let url = this.normalizeGatewayUrl(resolveAddressInput(input, this.settingsManager.getSetting('searchEngine')));
         
         // If no protocol, HNS names default to the native HNS HTTP path for compatibility.
         // Explicit https:// HNS URLs still use the DANE/TLSA status path.
-        if (!url.startsWith('http://') && !url.startsWith('https://') && !url.startsWith('file://')) {
-            const inputHost = url.split(/[/?#]/)[0];
+        if (!/^(?:https?|file):\/\//i.test(url)) {
+            const inputHost = new URL(`http://${url}`).hostname;
             url = `${this.isHNSDomain(inputHost) ? 'http' : 'https'}://${url}`;
         }
         url = this.normalizeGatewayUrl(url);
@@ -804,10 +897,13 @@ class SkyIncludeBrowser {
                 console.log('Attempting HNS resolution');
                 
                 // Try HNS resolution
-                const hnsResult = await this.resolveHNS(hostname);
+                const hnsResult = await this.resolveHNS(hostname, options);
+                options.signal?.throwIfAborted();
                 if (hnsResult) {
                     this.log('hns-resolution-success', this.getResolutionDiagnostics(hnsResult));
-                    return await this.buildHNSNavigation(url, hnsResult);
+                    const navigation = await this.buildHNSNavigation(url, hnsResult);
+                    options.signal?.throwIfAborted();
+                    return { ...navigation, profilePromise: hnsResult.profilePromise };
                 }
                 
                 // Keep HNS traffic on the local proxy even when pre-resolution is transient.
@@ -821,6 +917,7 @@ class SkyIncludeBrowser {
             
             return { url, hostingProvider: this.getHostingProviderForUrl(url) };
         } catch (error) {
+            if (options.signal?.aborted || error.name === 'AbortError') throw error;
             console.error('URL resolution error:', error);
             throw new Error(`Invalid URL: ${input}`);
         }
@@ -847,18 +944,30 @@ class SkyIncludeBrowser {
     async updateTabUrlFromNavigation(tabId, navigationUrl) {
         const tab = this.tabs.get(tabId);
         if (!tab) return;
+        // A committed link/history navigation can supersede address-bar DNS work.
+        // Our own loadURL runs only after resolving=false, so it is not cancelled here.
+        if (tab.resolving) {
+            tab.navigationAbortController?.abort();
+            tab.navigationToken = Symbol('committed-navigation');
+            tab.navigationAbortController = new AbortController();
+            tab.resolving = false;
+        }
+        const navigationToken = tab.navigationToken;
+        const metadataToken = Symbol('committed-navigation');
+        tab.metadataToken = metadataToken;
 
         try {
             const parsedUrl = new URL(this.normalizeGatewayUrl(navigationUrl));
             if (parsedUrl.protocol === 'file:' && parsedUrl.pathname.endsWith('/announcement.html')) {
                 tab.url = 'skyinclude://home';
+                tab.displayUrl = tab.url;
                 tab.title = 'New Tab';
                 tab.hostingProvider = null;
                 tab.hnsProfile = null;
                 tab.securityInfo = this.buildSecurityInfo('local-home');
                 this.mainWindow.webContents.send('loading-changed', {
                     tabId,
-                    loading: false,
+                    loading: tab.loading,
                     url: tab.url,
                     canGoBack: tab.view.webContents.canGoBack(),
                     canGoForward: tab.view.webContents.canGoForward(),
@@ -874,7 +983,7 @@ class SkyIncludeBrowser {
                 if (parsedUrl.protocol === 'data:' && tab.securityInfo) {
                     this.mainWindow.webContents.send('loading-changed', {
                         tabId,
-                        loading: false,
+                        loading: tab.loading,
                         url: tab.url,
                         canGoBack: tab.view.webContents.canGoBack(),
                         canGoForward: tab.view.webContents.canGoForward(),
@@ -891,7 +1000,7 @@ class SkyIncludeBrowser {
                 tab.securityInfo = null;
                 this.mainWindow.webContents.send('loading-changed', {
                     tabId,
-                    loading: false,
+                    loading: tab.loading,
                     url: tab.url,
                     canGoBack: tab.view.webContents.canGoBack(),
                     canGoForward: tab.view.webContents.canGoForward(),
@@ -912,18 +1021,22 @@ class SkyIncludeBrowser {
                 tab.hnsProfile = null;
                 tab.securityInfo = null;
             } else {
-                await this.updateHNSMetadataForNavigation(tab, parsedUrl);
+                await this.updateHNSMetadataForNavigation(tab, parsedUrl, navigationToken, metadataToken);
+                if (this.tabs.get(tabId) !== tab || tab.navigationToken !== navigationToken ||
+                    tab.metadataToken !== metadataToken ||
+                    tab.navigationAbortController?.signal.aborted) return;
             }
 
             const previousHost = this.getHostnameForDisplayUrl(tab.url);
             tab.url = parsedUrl.toString().replace(/^http:\/\//, '');
+            tab.displayUrl = tab.url;
             const nextHost = this.getHostnameForDisplayUrl(tab.url);
             if (!tab.title || tab.title === 'New Tab' || (previousHost && nextHost && previousHost !== nextHost)) {
                 tab.title = this.getFallbackTitleForUrl(tab.url);
             }
             this.mainWindow.webContents.send('loading-changed', {
                 tabId,
-                loading: false,
+                loading: tab.loading,
                 url: tab.url,
                 canGoBack: tab.view.webContents.canGoBack(),
                 canGoForward: tab.view.webContents.canGoForward(),
@@ -937,13 +1050,18 @@ class SkyIncludeBrowser {
         }
     }
 
-    async updateHNSMetadataForNavigation(tab, parsedUrl) {
+    async updateHNSMetadataForNavigation(tab, parsedUrl, navigationToken = tab.navigationToken, metadataToken = tab.metadataToken) {
         const hostname = this.normalizeGatewayHost(parsedUrl.hostname);
+        const isCurrent = () => this.tabs.get(tab.id) === tab && tab.navigationToken === navigationToken &&
+            tab.metadataToken === metadataToken &&
+            !tab.navigationAbortController?.signal.aborted;
         try {
-            const resolution = await this.resolveHNS(hostname);
+            const resolution = await this.resolveHNS(hostname, { signal: tab.navigationAbortController?.signal });
+            if (!isCurrent()) return;
             if (resolution) {
                 tab.hostingProvider = this.getHostingProviderForResolution(resolution);
                 tab.hnsProfile = resolution.hnsProfile || null;
+                this.attachDeferredProfile(tab, resolution.profilePromise, navigationToken, hostname);
                 tab.securityInfo = parsedUrl.protocol === 'http:'
                     ? this.buildSecurityInfo('hns-http', { domain: hostname })
                     : tab.securityInfo;
@@ -953,9 +1071,11 @@ class SkyIncludeBrowser {
                 return;
             }
         } catch (error) {
+            if (!isCurrent()) return;
             this.log('hns-navigation-metadata-error', { host: hostname, message: error.message });
         }
 
+        if (!isCurrent()) return;
         tab.hostingProvider = null;
         tab.hnsProfile = null;
         tab.securityInfo = this.buildSecurityInfo('hns-unresolved', { domain: hostname });
@@ -984,14 +1104,15 @@ class SkyIncludeBrowser {
         return isIPAddress(hostname);
     }
 
-    async resolveHNS(domain) {
+    async resolveHNS(domain, options = {}) {
         const attempts = 1;
         const startedAt = Date.now();
 
         for (let attempt = 1; attempt <= attempts; attempt += 1) {
             const attemptStartedAt = Date.now();
             try {
-                const result = await this.hnsResolver.resolveHNSDomain(domain);
+                const result = await this.hnsResolver.resolveHNSDomain(domain, options);
+                options.signal?.throwIfAborted();
                 if (result) {
                     this.log('hns-resolution-complete', {
                         attempt,
@@ -1008,6 +1129,7 @@ class SkyIncludeBrowser {
                     attemptElapsedMs: Date.now() - attemptStartedAt
                 });
             } catch (error) {
+                if (options.signal?.aborted || error.name === 'AbortError') throw error;
                 this.log('hns-resolution-error', {
                     attempt,
                     message: error.message,
@@ -1078,6 +1200,11 @@ class SkyIncludeBrowser {
         if (!tab || tab.id !== this.activeTabId || tab.loading) {
             return;
         }
+        const navigationToken = tab.navigationToken;
+        const isCurrent = () => this.tabs.get(tabId) === tab && tab.id === this.activeTabId &&
+            tab.navigationToken === navigationToken && !tab.loading &&
+            this.getHostnameForDisplayUrl(tab.url) === check.domain;
+        if (!isCurrent()) return;
 
         const cacheKey = `${check.domain}|${check.address}|${check.port || 443}`.toLowerCase();
         const cached = this.hnsHttpsAvailabilityCache.get(cacheKey);
@@ -1169,6 +1296,8 @@ class SkyIncludeBrowser {
             return;
         }
 
+        if (!isCurrent()) return;
+
         this.sendStatusMessage(`DANE-verified HTTPS is available for ${check.domain}.`, 'success', {
             label: 'Open HTTPS',
             url: check.upgradeUrl
@@ -1198,7 +1327,6 @@ class SkyIncludeBrowser {
 
             return {
                 ...buildNativeHnsHttpNavigation(originalUrl, resolution),
-                bypassCache: true,
                 hostingProvider,
                 hnsProfile: resolution.hnsProfile || null,
                 securityInfo: this.buildSecurityInfo('hns-http', { domain: resolution.domain }),
@@ -1622,12 +1750,8 @@ ${error ? `<p class="error">${this.escapeHtml(error)}</p>` : ''}
 
     log(event, data = {}) {
         try {
-            const dir = path.dirname(this.logFile);
-            if (!fs.existsSync(dir)) {
-                fs.mkdirSync(dir, { recursive: true });
-            }
             const versionSummary = event === 'app-started' && data.version ? ` version=${data.version}` : '';
-            fs.appendFileSync(this.logFile, `${new Date().toISOString()} ${event}${versionSummary} ${JSON.stringify(this.redactLogData(data))}\n`);
+            this.logWriter.append(`${new Date().toISOString()} ${event}${versionSummary} ${JSON.stringify(this.redactLogData(data))}\n`);
         } catch (error) {
             console.error('Failed to write SkyInclude log:', error);
         }
@@ -1746,22 +1870,60 @@ ${error ? `<p class="error">${this.escapeHtml(error)}</p>` : ''}
     }
 
     async handleHnsProxyRequest(clientReq, clientRes) {
+        const controller = new AbortController();
+        let upstreamReq;
+        let upstreamRes;
+        let timedOut = false;
+        let timer = setTimeout(() => {
+            timedOut = true;
+            controller.abort();
+        }, this.proxyConnectionTimeoutMs);
+        const cancel = () => {
+            clearTimeout(timer);
+            controller.abort();
+            upstreamReq?.destroy();
+            upstreamRes?.destroy();
+        };
+        const onClose = () => {
+            if (!clientRes.writableEnded) cancel();
+        };
+        clientReq.once('aborted', cancel);
+        clientReq.once('error', cancel);
+        clientRes.once('close', onClose);
+        clientRes.once('finish', () => {
+            clearTimeout(timer);
+            clientReq.off('aborted', cancel);
+            clientReq.off('error', cancel);
+            clientRes.off('close', onClose);
+        });
+        const fail = (error, status = timedOut ? 504 : 502) => {
+            clearTimeout(timer);
+            if (clientRes.destroyed || clientRes.writableEnded) return;
+            if (clientRes.headersSent) {
+                clientRes.destroy();
+            } else {
+                clientRes.writeHead(status, { 'Content-Type': 'text/plain' });
+                clientRes.end(timedOut ? 'Website connection timed out. Please retry.' : error.message);
+            }
+        };
         try {
             const requestUrl = new URL(clientReq.url);
             const host = this.normalizeGatewayHost(requestUrl.hostname);
             const isHnsHost = this.isHNSDomain(host);
-            let address = isHnsHost ? this.hnsProxyHosts.get(host) : requestUrl.hostname;
+            let address = isHnsHost ? this.hnsProxyHosts.get(host) : requestUrl.hostname.replace(/^\[|\]$/g, '');
 
             if (isHnsHost && !address) {
-                const resolution = await this.resolveHNS(host);
+                const resolution = await this.resolveHNS(host, { signal: controller.signal });
                 address = resolution && resolution.address;
                 if (address) {
                     this.hnsProxyHosts.set(host, address);
                 }
             }
 
+            controller.signal.throwIfAborted();
+
             if (!isHnsHost) {
-                address = requestUrl.hostname;
+                address = requestUrl.hostname.replace(/^\[|\]$/g, '');
             }
 
             if (isHnsHost && !address) {
@@ -1771,7 +1933,7 @@ ${error ? `<p class="error">${this.escapeHtml(error)}</p>` : ''}
             }
 
             const headers = { ...clientReq.headers };
-            headers.host = isHnsHost ? host : (clientReq.headers.host || requestUrl.host);
+            headers.host = isHnsHost ? `${host}${requestUrl.port ? `:${requestUrl.port}` : ''}` : (clientReq.headers.host || requestUrl.host);
             delete headers['proxy-connection'];
 
             this.log('hns-proxy-request', {
@@ -1782,52 +1944,133 @@ ${error ? `<p class="error">${this.escapeHtml(error)}</p>` : ''}
                 path: requestUrl.pathname + requestUrl.search
             });
 
-            const upstreamReq = http.request({
+            upstreamReq = http.request({
                 hostname: address,
                 port: requestUrl.port || 80,
                 method: clientReq.method,
                 path: requestUrl.pathname + requestUrl.search,
-                headers
-            }, upstreamRes => {
-                clientRes.writeHead(upstreamRes.statusCode, upstreamRes.headers);
-                upstreamRes.pipe(clientRes);
+                headers,
+                signal: controller.signal
+            }, response => {
+                clearTimeout(timer);
+                receivedHeaders = true;
+                upstreamRes = response;
+                response.on('error', fail);
+                response.on('aborted', () => fail(new Error('Website response interrupted. Please retry.')));
+                clientRes.writeHead(response.statusCode, response.headers);
+                response.pipe(clientRes);
+            });
+
+            let connected = false;
+            let requestFinished = false;
+            let receivedHeaders = false;
+            const awaitHeaders = () => {
+                if (!connected || !requestFinished || receivedHeaders || controller.signal.aborted) return;
+                clearTimeout(timer);
+                timer = setTimeout(() => {
+                    timedOut = true;
+                    controller.abort();
+                }, this.proxyConnectionTimeoutMs);
+            };
+            upstreamReq.once('socket', socket => {
+                const onConnect = () => {
+                    connected = true;
+                    clearTimeout(timer);
+                    awaitHeaders();
+                };
+                if (socket.connecting) socket.once('connect', onConnect);
+                else onConnect();
+            });
+            upstreamReq.once('finish', () => {
+                requestFinished = true;
+                awaitHeaders();
+            });
+
+            // Bound idle streams, not total downloads or media playback duration.
+            upstreamReq.setTimeout(this.proxyIdleTimeoutMs, () => {
+                timedOut = true;
+                upstreamReq.destroy(new Error('Website response timed out. Please retry.'));
             });
 
             upstreamReq.on('error', error => {
                 this.log('hns-proxy-error', { host, address, message: error.message });
-                if (!clientRes.headersSent) {
-                    clientRes.writeHead(502, { 'Content-Type': 'text/plain' });
-                }
-                clientRes.end(error.message);
+                fail(error);
             });
 
             clientReq.pipe(upstreamReq);
         } catch (error) {
             this.log('hns-proxy-request-error', { url: clientReq.url, message: error.message });
-            clientRes.writeHead(500, { 'Content-Type': 'text/plain' });
-            clientRes.end(error.message);
+            fail(error, timedOut ? 504 : 500);
         }
     }
 
     async handleHnsProxyConnect(clientReq, clientSocket, head) {
+        const controller = new AbortController();
+        let upstreamSocket;
+        let established = false;
+        let timedOut = false;
+        const timer = setTimeout(() => {
+            timedOut = true;
+            controller.abort();
+            upstreamSocket?.destroy(new Error('Website connection timed out'));
+            if (!clientSocket.destroyed && !clientSocket.writableEnded) {
+                clientSocket.end('HTTP/1.1 504 Gateway Timeout\r\n\r\n');
+            }
+        }, this.proxyConnectionTimeoutMs);
+        const cancel = () => {
+            clearTimeout(timer);
+            controller.abort();
+            upstreamSocket?.destroy();
+        };
+        // Read while resolving so a disconnected client is noticed immediately.
+        // Preserve early TLS bytes until the upstream tunnel is ready.
+        const pendingData = head?.length ? [head] : [];
+        let pendingBytes = head?.length || 0;
+        const collect = chunk => {
+            pendingBytes += chunk.length;
+            if (pendingBytes > 64 * 1024) {
+                cancel();
+                clientSocket.destroy();
+                return;
+            }
+            pendingData.push(chunk);
+        };
+        const onEnd = () => {
+            cancel();
+            clientSocket.end();
+        };
+        clientSocket.on('data', collect);
+        clientSocket.once('end', onEnd);
+        clientSocket.once('close', cancel);
+        clientSocket.once('error', cancel);
         try {
-            const [rawHost, rawPort] = String(clientReq.url || '').split(':');
+            if (pendingBytes > 64 * 1024) throw new Error('CONNECT preface too large');
+            // HTTPS defaults preserve an explicit :80 instead of URL-normalizing it away.
+            const target = new URL(`https://${clientReq.url}`);
+            if (target.username || target.password || target.pathname !== '/' || target.search || target.hash) {
+                throw new Error('Invalid CONNECT target');
+            }
+            const rawHost = target.hostname.replace(/^\[|\]$/g, '');
             const host = this.normalizeGatewayHost(String(rawHost || '').toLowerCase());
-            const port = Number(rawPort) || 443;
+            const port = Number(target.port) || 443;
+            if (target.port === '0') throw new Error('Invalid CONNECT port');
             const isHnsHost = this.isHNSDomain(host);
 
             let address = isHnsHost ? this.hnsProxyHosts.get(host) : rawHost;
             if (isHnsHost && !address) {
-                const resolution = await this.resolveHNS(host);
+                const resolution = await this.resolveHNS(host, { signal: controller.signal });
                 address = resolution && resolution.address;
                 if (address) {
                     this.hnsProxyHosts.set(host, address);
                 }
             }
 
+            controller.signal.throwIfAborted();
+
             if (isHnsHost && !address) {
                 clientSocket.write('HTTP/1.1 502 Bad Gateway\r\n\r\n');
                 clientSocket.destroy();
+                clearTimeout(timer);
                 return;
             }
 
@@ -1837,31 +2080,39 @@ ${error ? `<p class="error">${this.escapeHtml(error)}</p>` : ''}
                 port
             });
 
-            const upstreamSocket = net.connect(port, address, () => {
-                clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
-                if (head && head.length) {
-                    upstreamSocket.write(head);
+            upstreamSocket = net.connect(port, address, () => {
+                clearTimeout(timer);
+                if (clientSocket.destroyed || controller.signal.aborted) {
+                    upstreamSocket.destroy();
+                    return;
                 }
+                established = true;
+                clientSocket.off('data', collect);
+                clientSocket.off('end', onEnd);
+                clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+                for (const chunk of pendingData) upstreamSocket.write(chunk);
+                pendingData.length = 0;
                 upstreamSocket.pipe(clientSocket);
                 clientSocket.pipe(upstreamSocket);
             });
 
             upstreamSocket.on('error', error => {
+                clearTimeout(timer);
                 this.log('hns-proxy-connect-error', { host, address, message: error.message });
-                if (!clientSocket.destroyed) {
-                    clientSocket.write('HTTP/1.1 502 Bad Gateway\r\n\r\n');
-                    clientSocket.destroy();
+                if (!clientSocket.destroyed && !clientSocket.writableEnded) {
+                    if (established) clientSocket.destroy();
+                    else clientSocket.end(timedOut ? 'HTTP/1.1 504 Gateway Timeout\r\n\r\n' : 'HTTP/1.1 502 Bad Gateway\r\n\r\n');
                 }
             });
 
-            clientSocket.on('error', () => {
-                upstreamSocket.destroy();
+            upstreamSocket.once('close', () => {
+                if (!clientSocket.destroyed) clientSocket.end();
             });
         } catch (error) {
+            clearTimeout(timer);
             this.log('hns-proxy-connect-request-error', { url: clientReq.url, message: error.message });
-            if (!clientSocket.destroyed) {
-                clientSocket.write('HTTP/1.1 500 Internal Server Error\r\n\r\n');
-                clientSocket.destroy();
+            if (!clientSocket.destroyed && !clientSocket.writableEnded) {
+                clientSocket.end(timedOut ? 'HTTP/1.1 504 Gateway Timeout\r\n\r\n' : 'HTTP/1.1 500 Internal Server Error\r\n\r\n');
             }
         }
     }
@@ -2444,6 +2695,8 @@ document.querySelectorAll('.copy').forEach(button => {
                 this.log('debug-log-created');
             }
 
+            await this.logWriter.flush();
+
             const errorMessage = await shell.openPath(this.logFile);
             if (errorMessage) {
                 throw new Error(errorMessage);
@@ -2458,6 +2711,7 @@ document.querySelectorAll('.copy').forEach(button => {
     }
 
     async clearCacheAndReload() {
+        this.stopTabLoading(this.activeTabId);
         if (typeof this.hnsResolver.clearCache === 'function') {
             this.hnsResolver.clearCache();
         }
@@ -2616,7 +2870,7 @@ document.querySelectorAll('.copy').forEach(button => {
                         accelerator: 'CmdOrCtrl+R',
                         click: () => {
                             if (this.currentView) {
-                                this.currentView.webContents.reload();
+                                this.reloadTab(this.activeTabId);
                             }
                         }
                     },
@@ -2788,17 +3042,17 @@ document.querySelectorAll('.copy').forEach(button => {
                 {
                     label: 'Back',
                     enabled: webContents.canGoBack(),
-                    click: () => webContents.goBack()
+                    click: () => this.traverseTabHistory(this.getTabIdForWebContents(webContents), 'back')
                 },
                 {
                     label: 'Forward',
                     enabled: webContents.canGoForward(),
-                    click: () => webContents.goForward()
+                    click: () => this.traverseTabHistory(this.getTabIdForWebContents(webContents), 'forward')
                 },
                 {
                     label: 'Reload',
                     accelerator: 'CmdOrCtrl+R',
-                    click: () => webContents.reload()
+                    click: () => this.reloadTab(this.getTabIdForWebContents(webContents))
                 },
                 { type: 'separator' },
                 {
@@ -2832,32 +3086,28 @@ document.querySelectorAll('.copy').forEach(button => {
 
         ipcMain.handle('go-back', (event, tabId) => {
             this.requireTrustedIpcSender(event, 'go-back');
-            const tab = this.tabs.get(this.resolveTabId(tabId));
-            if (tab && tab.view.webContents.canGoBack()) {
-                tab.view.webContents.goBack();
-            }
+            this.traverseTabHistory(this.resolveTabId(tabId), 'back');
         });
 
         ipcMain.handle('go-forward', (event, tabId) => {
             this.requireTrustedIpcSender(event, 'go-forward');
-            const tab = this.tabs.get(this.resolveTabId(tabId));
-            if (tab && tab.view.webContents.canGoForward()) {
-                tab.view.webContents.goForward();
-            }
+            this.traverseTabHistory(this.resolveTabId(tabId), 'forward');
         });
 
         ipcMain.handle('reload', (event, tabId) => {
             this.requireTrustedIpcSender(event, 'reload');
-            const tab = this.tabs.get(this.resolveTabId(tabId));
-            if (tab) {
-                tab.view.webContents.reload();
-            }
+            return this.reloadTab(this.resolveTabId(tabId));
+        });
+
+        ipcMain.handle('stop-loading', (event, tabId) => {
+            this.requireTrustedIpcSender(event, 'stop-loading');
+            this.stopTabLoading(this.resolveTabId(tabId));
         });
 
         // Tab management
         ipcMain.handle('new-tab', async (event, url) => {
             this.requireTrustedIpcSender(event, 'new-tab');
-            return await this.createNewTab(this.validateNavigationInput(url));
+            return await this.createNewTab(this.validateNavigationInput(url, this.settingsManager.getSetting('homepage') || 'skyinclude://home'));
         });
 
         ipcMain.handle('close-tab', (event, tabId) => {
@@ -3021,6 +3271,30 @@ document.querySelectorAll('.copy').forEach(button => {
 }
 
 // App event handlers
+let persistenceFlushedForQuit = false;
+let persistenceFlushInProgress = false;
+app.on('before-quit', event => {
+    if (persistenceFlushedForQuit) return;
+    event.preventDefault();
+    if (persistenceFlushInProgress) return;
+    persistenceFlushInProgress = true;
+    if (activeBrowser) {
+        for (const tab of activeBrowser.tabs.values()) {
+            tab.navigationAbortController?.abort();
+            if (!tab.view.webContents.isDestroyed()) tab.view.webContents.stop();
+        }
+    }
+    Promise.all([
+        require('./history.js').flush(),
+        activeBrowser?.logWriter.flush()
+    ]).catch(error => {
+        console.error('Unable to flush browser persistence:', error);
+    }).finally(() => {
+        persistenceFlushedForQuit = true;
+        app.quit();
+    });
+});
+
 app.whenReady().then(async () => {
     activeBrowser = new SkyIncludeBrowser();
     await activeBrowser.createMainWindow();

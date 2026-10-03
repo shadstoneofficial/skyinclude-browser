@@ -5,6 +5,8 @@ class SkyIncludeRenderer {
         this.tabs = new Map();
         this.activeTabId = null;
         this.currentUrl = '';
+        this.navigationRequestId = 0;
+        this.isLoading = false;
         this.securityPopoverOpen = false;
         
         this.initializeElements();
@@ -56,7 +58,7 @@ class SkyIncludeRenderer {
         // Navigation
         this.backBtn.addEventListener('click', () => this.goBack());
         this.forwardBtn.addEventListener('click', () => this.goForward());
-        this.reloadBtn.addEventListener('click', () => this.reload());
+        this.reloadBtn.addEventListener('click', () => this.isLoading ? this.stopLoading() : this.reload());
         
         // Address bar
         this.addressBar.addEventListener('keypress', (e) => {
@@ -175,6 +177,10 @@ class SkyIncludeRenderer {
                 e.preventDefault();
                 this.openDevTools();
             }
+            if (e.key === 'Escape' && this.isLoading) {
+                e.preventDefault();
+                this.stopLoading();
+            }
         });
     }
 
@@ -262,6 +268,7 @@ class SkyIncludeRenderer {
     // Navigation methods
     async navigateToUrl(url) {
         if (!url.trim()) return;
+        const requestId = ++this.navigationRequestId;
         
         try {
             this.showLoading(true);
@@ -269,8 +276,8 @@ class SkyIncludeRenderer {
                 tabId: this.activeTabId, 
                 url: url 
             });
-            this.updateAddressBar(url);
         } catch (error) {
+            if (requestId !== this.navigationRequestId) return;
             this.showError(`Navigation failed: ${error.message}`);
             this.showLoading(false);
         }
@@ -299,6 +306,16 @@ class SkyIncludeRenderer {
         } catch (error) {
             console.error('Reload failed:', error);
             this.showLoading(false);
+        }
+    }
+
+    async stopLoading() {
+        ++this.navigationRequestId;
+        try {
+            await window.electronAPI.stopLoading(this.activeTabId);
+            this.showLoading(false);
+        } catch (error) {
+            console.error('Stop loading failed:', error);
         }
     }
 
@@ -522,6 +539,7 @@ class SkyIncludeRenderer {
     }
 
     showLoading(loading) {
+        this.isLoading = Boolean(loading);
         if (loading) {
             this.loadingIndicator.classList.add('visible');
             this.reloadBtn.querySelector('i').className = 'fas fa-times';
@@ -531,6 +549,7 @@ class SkyIncludeRenderer {
             this.reloadBtn.querySelector('i').className = 'fas fa-redo-alt';
             this.reloadBtn.title = 'Reload';
         }
+        this.reloadBtn.setAttribute('aria-label', this.reloadBtn.title);
     }
 
     // Tab UI rendering

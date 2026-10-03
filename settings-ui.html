@@ -242,8 +242,8 @@
                     <p class="setting-description">Choose how HNS domains are resolved</p>
                     <select id="hnsResolutionMode" class="form-control form-select">
                         <option value="doh">DNS over HTTPS (DoH) - Fast and reliable</option>
-                        <option value="p2p">P2P Light Client - Fully decentralized</option>
                     </select>
+                    <p class="setting-description">A bundled P2P light client is not available yet. Resolver operators can observe requested names.</p>
                 </div>
 
                 <div class="setting-group">
@@ -260,7 +260,7 @@
 
                 <div class="setting-group">
                     <label class="setting-label">Resolution Timeout (ms)</label>
-                    <p class="setting-description">Maximum time to wait for HNS resolution</p>
+                    <p class="setting-description">Absolute deadline per resolver query. Trying fallback endpoints can take longer.</p>
                     <input type="number" id="hnsTimeout" class="form-control" min="1000" max="30000" step="1000">
                 </div>
 
@@ -281,9 +281,9 @@
             <div class="section-content">
                 <div class="setting-group">
                     <label class="setting-label">
-                        <input type="checkbox" id="blockTrackers"> Block Trackers
+                        <input type="checkbox" id="blockTrackers" disabled> Tracker blocking (not implemented yet)
                     </label>
-                    <p class="setting-description">Prevent websites from tracking your browsing activity</p>
+                    <p class="setting-description">No tracker filter is active. The saved preference is reserved for a future implementation.</p>
                 </div>
 
                 <div class="setting-group">
@@ -295,9 +295,9 @@
 
                 <div class="setting-group">
                     <label class="setting-label">
-                        <input type="checkbox" id="hnsFallbackToDNS"> Fallback to Traditional DNS
+                        <input type="checkbox" id="hnsFallbackToDNS" disabled> Traditional DNS fallback (not used for HNS)
                     </label>
-                    <p class="setting-description">Use regular DNS if HNS resolution fails</p>
+                    <p class="setting-description">Unresolved native HNS names stay on the HNS path; resolver outages do not fall back to traditional DNS.</p>
                 </div>
             </div>
         </div>
@@ -362,7 +362,7 @@
         }
 
         function populateSettings(settings) {
-            document.getElementById('hnsResolutionMode').value = settings.hnsResolutionMode || 'doh';
+            document.getElementById('hnsResolutionMode').value = 'doh';
             document.getElementById('hnsCustomResolver').value = settings.hnsCustomResolver || '';
             document.getElementById('hnsResolvers').value = (settings.hnsResolvers || [])
                 .map(formatResolverSetting)

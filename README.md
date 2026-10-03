@@ -17,21 +17,27 @@ It resolves HNS names with DNS-over-HTTPS, supports HeadlessDomains agent/chatbo
 
 Requirements:
 
-- Node.js 18+
+- Node.js 22.12.0+ (CI and release builds use Node 22)
 - npm
+- Git (used to apply the version- and content-checked build-tool patch)
 
 Install and run:
 
 ```bash
-npm install
+npm ci
 npm start
 ```
 
-Run syntax checks:
+Run the complete test suite and syntax checks:
 
 ```bash
 npm test
 ```
+
+Build dependencies are pinned in `package-lock.json`. `npm ci` also applies a
+reviewed Electron Builder download-compatibility patch; do not skip lifecycle
+scripts for packaging. See [toolchain maintenance](docs/toolchain-maintenance.md)
+before changing Electron Builder, `@electron/get`, or the patch.
 
 Build macOS DMGs:
 

@@ -119,29 +119,26 @@
                             <input type="radio" name="hns-mode" value="doh" checked>
                             DNS-over-HTTPS (recommended)
                         </label>
-                        <label class="setting-item">
-                            <input type="radio" name="hns-mode" value="p2p">
-                            P2P Light Client (more private)
-                        </label>
+                        <p>A bundled P2P light client is not available yet. Resolver operators can observe requested names.</p>
                     </div>
                     
                     <div class="settings-section">
                         <h4>Privacy</h4>
                         <label class="setting-item">
-                            <input type="checkbox" id="block-trackers" checked>
-                            Block tracking scripts
+                            <input type="checkbox" id="block-trackers" disabled>
+                            Tracker blocking (not implemented yet)
                         </label>
                         <label class="setting-item">
                             <input type="checkbox" id="disable-javascript" checked>
-                            Enable JavaScript
+                            Enable JavaScript (applies to new tabs)
                         </label>
                     </div>
                     
                     <div class="settings-section">
                         <h4>Security</h4>
                         <label class="setting-item">
-                            <input type="checkbox" id="strict-ssl" checked>
-                            Strict SSL verification
+                            <input type="checkbox" id="strict-ssl" checked disabled>
+                            Certificate verification (always enforced)
                         </label>
                     </div>
 
