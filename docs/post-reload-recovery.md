@@ -50,8 +50,10 @@ SNI and DANE/TLSA verification remain on the existing paths.
   source-level HNS scenarios passed: DANE, HTTP-to-HTTPS redirects including
   POST 301/302/303/307/308, resolver/TLSA outage recovery, certificate and TLSA
   rejection, and cross-port certificate pinning. The older ungated startup
-  scenario timed out; retain that failure separately from this Reload fix and
-  use the first-rendered-tab acceptance gate for the targeted startup retest.
+  scenario timed out. A targeted rerun with the first-rendered-tab acceptance
+  gate also timed out waiting for fixture content. Both failures remain open
+  acceptance findings; do not claim all startup checks passed or proceed to a
+  new build until the acceptance owner diagnoses them.
 - Before a new build: review this change and check the real Cancel/default and
   Reload and resend controls on an unlocked Mac, including normal GET reload,
   repeated POST reload, Back/Forward, and a secured native HNS form fixture.
