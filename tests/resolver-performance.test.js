@@ -103,7 +103,7 @@ test('clear cache also prevents an already pending TLSA lookup from repopulating
     const records = [{ usage: 3, selector: 1, matchingType: 1, certificateAssociationData: 'ab'.repeat(32) }];
     resolver.queryResolver = async () => {
         await gate.promise;
-        return answer(records);
+        return { ...answer(records), authenticated: true };
     };
     const pending = resolver.resolveTLSARecords('example.hns');
     resolver.clearCache();

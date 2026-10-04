@@ -95,6 +95,8 @@ class HNSResolver {
         this.pendingResolutions = new Map();
         this.cacheGeneration = 0;
         this.tlsaCache = new Map();
+        this.pendingTLSAResolutions = new Map();
+        this.tlsaRevisions = new Map();
         this.tlsaCacheTimeout = 300000;
         this.resolverHealth = new Map();
         this.resolverDiagnostics = [];
@@ -151,8 +153,8 @@ class HNSResolver {
         const available = [];
         const cooling = [];
         candidates.forEach((resolver, configuredIndex) => {
-            const health = this.resolverHealth.get(this.getResolverKey(resolver));
-            if (health && health.retryAt > now) {
+            const health = this.resolverHealth.get(this.getResolverHealthKey(resolver, options.healthScope));
+            if (!options.ignoreCooldown && health && health.retryAt > now) {
                 cooling.push({ resolver, configuredIndex, retryAt: health.retryAt });
             } else {
                 available.push({ resolver, configuredIndex });
@@ -175,6 +177,10 @@ class HNSResolver {
         return `${resolver.transport}|${resolver.url}`.toLowerCase();
     }
 
+    getResolverHealthKey(resolver, scope = '') {
+        return `${this.getResolverKey(resolver)}${scope ? `|${scope}` : ''}`;
+    }
+
     getPublicResolverInfo(resolver) {
         return resolver ? {
             id: resolver.id,
@@ -194,14 +200,15 @@ class HNSResolver {
         }
     }
 
-    markResolverFailure(resolver, error, elapsedMs) {
-        const key = this.getResolverKey(resolver);
+    markResolverFailure(resolver, error, elapsedMs, healthScope = '') {
+        const key = this.getResolverHealthKey(resolver, healthScope);
         this.resolverHealth.set(key, {
             retryAt: Date.now() + this.resolverCooldownMs,
             error: error.message
         });
         this.recordResolverDiagnostic({
             event: 'failure',
+            recordScope: healthScope || 'website',
             resolver: this.getPublicResolverInfo(resolver),
             elapsedMs,
             status: error.rcodeName || error.code || 'ERROR',
@@ -209,10 +216,11 @@ class HNSResolver {
         });
     }
 
-    markResolverSuccess(resolver, elapsedMs, rcodeName, fallbackCount) {
-        this.resolverHealth.delete(this.getResolverKey(resolver));
+    markResolverSuccess(resolver, elapsedMs, rcodeName, fallbackCount, healthScope = '') {
+        this.resolverHealth.delete(this.getResolverHealthKey(resolver, healthScope));
         this.recordResolverDiagnostic({
             event: 'success',
+            recordScope: healthScope || 'website',
             resolver: this.getPublicResolverInfo(resolver),
             elapsedMs,
             status: rcodeName,
@@ -280,7 +288,7 @@ class HNSResolver {
         return this.joinPendingResolution(pendingKey, pending, options.signal);
     }
 
-    joinPendingResolution(pendingKey, pending, signal) {
+    joinPendingResolution(pendingKey, pending, signal, pendingStore = this.pendingResolutions) {
         pending.consumers += 1;
         return new Promise((resolve, reject) => {
             let completed = false;
@@ -296,8 +304,8 @@ class HNSResolver {
                 finish(this.createAbortError());
                 // A superseded tab must not cancel another tab's shared lookup.
                 if (!pending.settled && pending.consumers === 0) {
-                    if (this.pendingResolutions.get(pendingKey) === pending) {
-                        this.pendingResolutions.delete(pendingKey);
+                    if (pendingStore.get(pendingKey) === pending) {
+                        pendingStore.delete(pendingKey);
                     }
                     pending.controller.abort();
                 }
@@ -636,7 +644,10 @@ class HNSResolver {
         this.throwIfAborted(options.signal);
         const optionalTypes = [...new Set(options.optionalTypes || [])]
             .filter(type => DNS_TYPES[type] && !requestedTypes.includes(type));
-        const candidateState = this.getResolverCandidateState(options);
+        // A TLSA capability or DNSSEC failure must not cool down an otherwise
+        // healthy website resolver, nor inherit a previous website cooldown.
+        const healthScope = requestedTypes.includes('TLSA') ? 'TLSA' : '';
+        const candidateState = this.getResolverCandidateState({ ...options, healthScope });
         const attempts = candidateState.cooling.map(candidate => ({
             resolver: this.getPublicResolverInfo(candidate.resolver),
             status: 'COOLDOWN',
@@ -661,6 +672,11 @@ class HNSResolver {
             let optionalRecordsPromise = null;
             try {
                 this.throwIfAborted(options.signal);
+                if (options.requireAuthenticated && new URL(resolver.url).protocol !== 'https:') {
+                    const error = new Error('TLSA verification requires an authenticated HTTPS resolver connection');
+                    error.code = 'INSECURE_TLSA_TRANSPORT';
+                    throw error;
+                }
                 let optionalRecords = null;
                 if (optionalTypes.length) {
                     // Always observe optional failures, even after a native
@@ -693,6 +709,12 @@ class HNSResolver {
                 if (rcode !== 0 && rcode !== 3) {
                     throw this.createDnsResponseError(rcode);
                 }
+                const authenticated = responses.every(response => response.authenticated === true);
+                if (options.requireAuthenticated && !authenticated) {
+                    const error = new Error('HNS resolver did not authenticate the TLSA answer with DNSSEC');
+                    error.code = 'DNSSEC_UNAUTHENTICATED';
+                    throw error;
+                }
 
                 const records = Object.fromEntries([...requestedTypes, ...optionalTypes].map(type => [type, []]));
                 responses.forEach((response, responseIndex) => {
@@ -700,7 +722,7 @@ class HNSResolver {
                 });
                 if (optionalRecords?.rcode === rcode) Object.assign(records, optionalRecords.records);
                 const elapsedMs = Date.now() - startedAt;
-                this.markResolverSuccess(resolver, elapsedMs, this.getRcodeName(rcode), configuredIndex);
+                this.markResolverSuccess(resolver, elapsedMs, this.getRcodeName(rcode), configuredIndex, healthScope);
                 attempts.push({
                     resolver: this.getPublicResolverInfo(resolver),
                     status: this.getRcodeName(rcode),
@@ -712,6 +734,7 @@ class HNSResolver {
                     records,
                     rcode,
                     rcodeName: this.getRcodeName(rcode),
+                    authenticated,
                     resolver,
                     fallbackCount: configuredIndex,
                     elapsedMs,
@@ -723,7 +746,7 @@ class HNSResolver {
                 controller.abort();
                 if (error.name === 'AbortError' || options.signal?.aborted) throw this.createAbortError();
                 const elapsedMs = Date.now() - startedAt;
-                this.markResolverFailure(resolver, error, elapsedMs);
+                this.markResolverFailure(resolver, error, elapsedMs, healthScope);
                 attempts.push({
                     resolver: this.getPublicResolverInfo(resolver),
                     status: error.rcodeName || error.code || 'ERROR',
@@ -802,6 +825,10 @@ class HNSResolver {
         const url = new URL(resolver.url);
         url.searchParams.set('name', this.normalizeDomain(domain));
         url.searchParams.set('type', typeName);
+        if (typeName === 'TLSA') {
+            url.searchParams.set('do', 'true');
+            url.searchParams.set('cd', 'false');
+        }
         const data = await this.fetchJson(url.toString(), timeout, {
             Accept: 'application/dns-json',
             'User-Agent': 'SkyInclude/1.0.0'
@@ -841,7 +868,8 @@ class HNSResolver {
         return {
             records,
             rcode,
-            rcodeName: this.getRcodeName(rcode)
+            rcodeName: this.getRcodeName(rcode),
+            authenticated: data.AD === true && data.CD !== true
         };
     }
 
@@ -929,8 +957,14 @@ class HNSResolver {
         const queryId = Math.floor(Math.random() * 65535);
         const header = Buffer.alloc(12);
         header.writeUInt16BE(queryId, 0);
-        header.writeUInt16BE(0x0100, 2);
+        // Ask the validating recursive resolver for authenticated data (AD)
+        // and DNSSEC records (EDNS DO), without disabling validation (CD).
+        // This advertises DNSSEC support and exposes the validation status
+        // needed before trusting a TLSA certificate match. Upstream transport
+        // failures remain retryable regardless of these request flags.
+        header.writeUInt16BE(0x0120, 2);
         header.writeUInt16BE(1, 4);
+        header.writeUInt16BE(1, 10);
 
         const labels = [];
         for (const part of cleanName.split('.')) {
@@ -943,7 +977,8 @@ class HNSResolver {
         tail.writeUInt16BE(qtype, 0);
         tail.writeUInt16BE(1, 2);
 
-        return Buffer.concat([header, ...labels, tail]);
+        const edns = Buffer.from('00002904d0000080000000', 'hex');
+        return Buffer.concat([header, ...labels, tail, edns]);
     }
 
     parseDnsResponse(buffer, typeName) {
@@ -961,6 +996,7 @@ class HNSResolver {
         const qdcount = buffer.readUInt16BE(4);
         const ancount = buffer.readUInt16BE(6);
         const rcode = flags & 0x000f;
+        const authenticated = (flags & 0x0020) !== 0 && (flags & 0x0010) === 0;
         const results = [];
 
         if ((flags & 0x8000) === 0) {
@@ -997,7 +1033,7 @@ class HNSResolver {
             throw this.createDnsResponseError(rcode);
         }
         if (rcode === 3) {
-            return { records: [], rcode, rcodeName: this.getRcodeName(rcode) };
+            return { records: [], rcode, rcodeName: this.getRcodeName(rcode), authenticated };
         }
 
         let parsedAnswers = 0;
@@ -1052,7 +1088,8 @@ class HNSResolver {
         return {
             records: results.filter(Boolean),
             rcode,
-            rcodeName: this.getRcodeName(rcode)
+            rcodeName: this.getRcodeName(rcode),
+            authenticated
         };
     }
 
@@ -1142,35 +1179,74 @@ class HNSResolver {
         };
     }
 
-    buildTlsaName(domain) {
-        return `_443._tcp.${this.normalizeDomain(domain)}`;
+    buildTlsaName(domain, port = 443) {
+        const servicePort = Number(port);
+        if (!Number.isInteger(servicePort) || servicePort < 1 || servicePort > 65535) {
+            throw new Error('Invalid TLSA service port');
+        }
+        return `_${servicePort}._tcp.${this.normalizeDomain(domain)}`;
     }
 
     async resolveTLSARecords(domain, options = {}) {
-        const tlsaName = this.buildTlsaName(domain);
+        this.throwIfAborted(options.signal);
+        const tlsaName = this.buildTlsaName(domain, options.port);
         const candidateKey = normalizeResolverList([
             options.resolver,
             options.dohResolver,
             ...this.getResolverSettings().resolvers
         ]).map(resolver => this.getResolverKey(resolver)).join(',');
         const cacheKey = `${candidateKey}|${tlsaName}`.toLowerCase();
+        if (options.force) {
+            // Refresh revokes old trust immediately, even if every resolver
+            // subsequently fails. An older request cannot restore that trust.
+            this.tlsaCache.delete(cacheKey);
+            this.pendingTLSAResolutions.get(cacheKey)?.controller.abort();
+            this.pendingTLSAResolutions.delete(cacheKey);
+        }
         const cached = this.tlsaCache.get(cacheKey);
 
-        if (!options.force && cached && Date.now() - cached.timestamp < this.tlsaCacheTimeout) {
+        if (!options.force && cached?.authenticated === true
+            && Date.now() - cached.timestamp < this.tlsaCacheTimeout) {
             return cached.records;
         }
 
-        const generation = this.cacheGeneration;
-        const response = await this.queryRecordSet(tlsaName, ['TLSA'], options);
-        const records = response.rcode === 3 ? [] : response.records.TLSA;
-        if (generation === this.cacheGeneration) {
-            this.tlsaCache.set(cacheKey, {
-                records,
-                resolver: this.getPublicResolverInfo(response.resolver),
-                timestamp: Date.now()
+        let pending = this.pendingTLSAResolutions.get(cacheKey);
+        if (!pending || pending.generation !== this.cacheGeneration) {
+            const controller = new AbortController();
+            const revision = Symbol('TLSA request');
+            this.tlsaRevisions.set(cacheKey, revision);
+            pending = { controller, consumers: 0, settled: false, generation: this.cacheGeneration };
+            pending.promise = this.queryRecordSet(tlsaName, ['TLSA'], {
+                ...options,
+                signal: controller.signal,
+                requireAuthenticated: true,
+                ignoreCooldown: options.force === true
+            }).then(response => {
+                // Also reject stale callers if their transport ignored abort.
+                // Merely suppressing the cache write could still authorize an
+                // obsolete certificate in the waiting navigation.
+                if (controller.signal.aborted || this.tlsaRevisions.get(cacheKey) !== revision) {
+                    throw this.createAbortError();
+                }
+                const records = response.rcode === 3 ? [] : response.records.TLSA;
+                if (pending.generation === this.cacheGeneration) {
+                    this.tlsaCache.set(cacheKey, {
+                        records,
+                        authenticated: true,
+                        resolver: this.getPublicResolverInfo(response.resolver),
+                        timestamp: Date.now()
+                    });
+                }
+                return records;
+            }).finally(() => {
+                pending.settled = true;
+                if (this.pendingTLSAResolutions.get(cacheKey) === pending) {
+                    this.pendingTLSAResolutions.delete(cacheKey);
+                }
             });
+            this.pendingTLSAResolutions.set(cacheKey, pending);
         }
-        return records;
+        return this.joinPendingResolution(cacheKey, pending, options.signal, this.pendingTLSAResolutions);
     }
 
     isSupportedTlsaRecord(record) {
@@ -1364,7 +1440,7 @@ class HNSResolver {
 
     async verifyDANE(domain, certificate, options = {}) {
         const cleanDomain = this.normalizeDomain(domain);
-        const tlsaName = this.buildTlsaName(cleanDomain);
+        const tlsaName = this.buildTlsaName(cleanDomain, options.port);
         const baseResult = {
             state: 'disabled',
             domain: cleanDomain,
@@ -1383,7 +1459,7 @@ class HNSResolver {
         try {
             records = Array.isArray(options.records)
                 ? options.records
-                : await this.resolveTLSARecords(cleanDomain);
+                : await this.resolveTLSARecords(cleanDomain, options);
         } catch (error) {
             return {
                 ...baseResult,

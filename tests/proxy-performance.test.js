@@ -23,6 +23,9 @@ async function listen(t, server) {
 
 async function proxy(t, options = {}) {
     const { browser } = makeBrowser();
+    // These tests exercise raw transport/echo servers. Actual DANE admission
+    // and TLS are covered separately by hns-https-redirect.test.js.
+    browser.ensureHnsHttpsAdmission = async () => ({ state: 'verified' });
     browser.hnsProxyHosts = new Map([['lisa.agent', '127.0.0.1']]);
     browser.proxyConnectionTimeoutMs = options.connectionTimeoutMs || 500;
     browser.proxyIdleTimeoutMs = options.idleTimeoutMs || 1000;

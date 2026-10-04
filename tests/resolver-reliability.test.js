@@ -114,7 +114,8 @@ test('distinguishes SERVFAIL, NXDOMAIN, and NOERROR NODATA', () => {
     }, 'missing.hns', 'A'), {
         records: [],
         rcode: 3,
-        rcodeName: 'NXDOMAIN'
+        rcodeName: 'NXDOMAIN',
+        authenticated: false
     });
 
     assert.deepEqual(resolver.parseDnsJsonResponse({
@@ -123,7 +124,8 @@ test('distinguishes SERVFAIL, NXDOMAIN, and NOERROR NODATA', () => {
     }, 'empty.hns', 'A'), {
         records: [],
         rcode: 0,
-        rcodeName: 'NOERROR'
+        rcodeName: 'NOERROR',
+        authenticated: false
     });
 });
 
@@ -262,7 +264,7 @@ test('TLSA lookup can fall back from wire DoH to DNS JSON', async () => {
     resolver.queryResolver = async candidate => {
         if (candidate.id === 'primary') throw new Error('wire resolver offline');
         assert.equal(candidate.transport, 'dns-json');
-        return response([expected]);
+        return { ...response([expected]), authenticated: true };
     };
 
     assert.deepEqual(await resolver.resolveTLSARecords('secure.hns', { force: true }), [expected]);
