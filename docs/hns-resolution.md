@@ -27,6 +27,15 @@ These authoritative answers are distinct from temporary resolver failures. A tim
 
 After an endpoint failure, an in-memory circuit breaker skips it for 30 seconds. This prevents every navigation from paying the full timeout while a community resolver is offline. Changing resolver settings or clearing the resolver cache resets this local health state.
 
+An explicit Retry or Reload from the matching generated website-outage page
+bypasses that cooldown for a fresh attempt. Ordinary navigations cannot use this
+bypass, and an ordinary in-flight lookup cannot absorb the explicit retry.
+
+Website and TLSA lookups have separate circuit-breaker health. An endpoint that
+cannot answer TLSA service names must not disable otherwise working A/AAAA/CNAME
+resolution, and a website-query cooldown must not prevent an independent TLSA
+attempt. Resolver order and customized endpoint lists are preserved.
+
 ### Deadlines, shared work, and caching
 
 Concurrent lookups for the same normalized hostname and resolver configuration
@@ -48,8 +57,13 @@ TLSA answers from repopulating them.
 Native HNS HTTP navigations retain Chromium's normal HTTP caching behavior.
 Loading a native site does not clear the shared session cache or force no-cache
 headers. The explicit Clear Cache and Reload command still clears page and
-resolver caches. Ordinary Reload uses Chromium reload semantics, including POST
-resubmission behavior; reloading an internal outage page retries resolution.
+resolver caches. Ordinary Reload calls Electron's native reload API; reloading
+an internal outage page retries resolution. Electron 42.11.3 has an upstream
+POST-reload limitation: its repost-confirmation path can silently do nothing.
+SkyInclude does not bypass that confirmation or reconstruct/resend form data.
+Native same-host form submissions and 307/308 redirects are separately tested;
+they must not be confused with resubmitting an already completed POST via Reload.
+See the [upstream reload implementation](https://github.com/electron/electron/blob/v42.11.3/shell/browser/api/electron_api_web_contents.cc#L2586).
 
 The loopback proxy limits connection work and the post-upload wait for initial
 response headers to 15 seconds each, and HTTP stream inactivity to 60 seconds.
@@ -95,12 +109,31 @@ Existing URL-only settings remain compatible and migrate to transport descriptor
 The built-in order is:
 
 1. HNS DoH (`doh-wire https://hnsdoh.com/dns-query`)
-2. Web3DNS (`dns-json https://api.web3dns.net/`)
-3. Shakestation DoH (`doh-wire https://resolve.shakestation.io/dns-query`)
+2. Web3DNS DoH (`doh-wire https://doh.web3dns.net/`)
 
-New installs receive all three entries. Existing installs that still have either the untouched legacy single-HNSDoH default or the untouched HNSDoH/Web3DNS built-in pair are upgraded to this three-endpoint order. Explicitly customized resolver lists keep their exact order, and the optional custom resolver remains first.
+Shakestation was retired from active use on 2026-10-04 at the project owner's
+direction. Its old endpoint is retained only in the provider archive. New
+installs receive the two active entries. Settings migration upgrades untouched
+legacy built-in lists and removes the exact retired hostname, including a
+retired custom-first endpoint. Other customized endpoints/order remain intact;
+the browser does not treat an arbitrary provider's display name or ID as proof
+that it is Shakestation. Affected users receive a retirement notice. If removal
+leaves a customized configuration without any resolver, the browser asks the
+user to select one rather than silently introducing another provider.
 
-The Web3DNS API root is the JSON endpoint. `https://api.web3dns.net/dns-query` is not used. The community-provided native resolver IPs (`82.68.70.162` and `82.68.70.163`) are deliberately not accepted in this list: native DNS is a different, unencrypted transport and must not be normalized into a DoH URL.
+The Web3DNS binary DoH endpoint uses the hostname root `/`. SkyInclude preserves
+that path instead of appending `/dns-query`. Other providers retain conventional
+DoH URL shorthand. The older `https://api.web3dns.net/` JSON adapter remains
+supported for existing customized configurations; neither Web3DNS endpoint uses
+`/dns-query`. The JSON and binary interfaces are the same provider, not two
+independent fallback operators. Native resolver IPs are deliberately not
+accepted in this list: native DNS is a different, unencrypted transport and
+must not be normalized into a DoH URL.
+
+Endpoint compatibility does not imply DNSSEC validation. A Web3DNS binary TLSA
+response observed on 2026-10-04 contained the correct record but AD=false. The
+browser must reject it for DANE trust and explain the missing authentication.
+See [provider status and pending operator questions](resolver-provider-status.md).
 
 The resolver test in Settings uses the saved resolver order and reports the endpoint name, transport, DNS status, fallback count, latency, and record counts.
 
@@ -108,7 +141,19 @@ The resolver test in Settings uses the saved resolver order and reports the endp
 
 Every third-party resolver can observe the names sent to it. Resolver selection therefore affects privacy as well as availability. Diagnostics retain a small in-memory history containing endpoint identity, transport, latency, status, and fallback count. They do not add answer contents or additional queried-name logging.
 
-Built-in endpoint changes require an explicit release decision backed by current health checks. Web3DNS remains the second built-in resolver. Shakestation was approved as the third, wire-format DoH fallback after its service recovered; it remains last because point-in-time probes showed intermittent first-query latency. Neither endpoint replaces HNS DoH as the first choice.
+Built-in endpoint changes require an explicit release decision backed by current
+health checks. HNS DoH remains first and Web3DNS remains second; Shakestation is
+archived and is never queried. Integration tests do not replace live provider
+qualification or establish an uptime guarantee.
+
+The HNS resolver indicator identifies the provider that actually answered the
+website lookup, not the first provider in Settings. Its details distinguish the
+website/address lookup from the TLSA/HTTPS identity lookup, because these can use
+different providers or fail independently. Details include the transport,
+sanitized endpoint, fallback attempts and whether a result came from cache.
+DNSSEC authentication and certificate verification remain separate from merely
+receiving a DNS answer. No provider is invented for an unresolved lookup, and
+ordinary ICANN/local pages must not inherit another tab's HNS resolver label.
 
 The address bar continues to show the HNS hostname and path, for example:
 
@@ -153,6 +198,59 @@ _443._tcp.<name> TLSA 3 1 1 <sha256-of-public-key>
 ```
 
 SkyInclude Browser keeps normal WebPKI validation for ICANN domains separate from HNS DANE/TLSA work.
+
+Wire-format requests set RD and AD and include an EDNS OPT record with DO;
+checking-disabled (CD) is not set. TLSA answers, including negative answers,
+must come over authenticated HTTPS and carry the recursive resolver's AD bit
+without CD. This delegates DNSSEC validation to the configured validating HNS
+resolver; the browser does not independently validate the DNSSEC chain. An
+unsigned/unvalidated response is a verification failure, not evidence that TLSA
+does not exist. SkyInclude tries the next configured endpoint and never falls
+back to ordinary ICANN DNS for TLSA. JSON APIs must likewise return `AD: true`
+without `CD: true`. Non-default HTTPS ports use `_<port>._tcp.<name>` and separate
+TLSA cache entries.
+
+Cold HTTP-to-HTTPS redirects use the same DANE admission path as an explicitly
+entered HTTPS URL. Before the local proxy opens an HNS CONNECT tunnel, SkyInclude
+resolves authenticated TLSA data, probes the exact address and port using the
+native hostname as SNI, and installs a certificate-fingerprint exception only
+after a successful match. Trust is scoped to the hostname, port, address, and
+resolver-cache generation. Chromium still handles the original redirect and
+request: the browser does not cancel a redirect and reconstruct it as a GET.
+The native hostname, path/query, Host header, SNI, cookies, and 307/308 method/body
+semantics therefore remain on the original browser request path. Once a native
+HTTP(S) document and its address mapping exist, same-native-host navigations
+also stay with Chromium, preserving form submissions. First visits, cross-host
+navigation, gateway normalization, and internal status/identity pages retain the
+existing resolution interception. This fix does not claim to add general
+cross-host HNS form-submission support.
+
+Electron's certificate-verification callback supplies a hostname but no port,
+and its decisions are cached by the network service. SkyInclude therefore also
+locks each HNS hostname to one SHA-256 certificate fingerprint for the browser
+process lifetime. Different ports may use that same certificate only after
+their own TLSA checks; a different certificate for the same hostname is blocked
+before opening the tunnel. A legitimate certificate rotation requires quitting
+and reopening the browser to verify the new certificate in a fresh session.
+Clearing website/resolver caches does not remove this safety lock. This is an
+intentional fail-closed limitation, not support for arbitrary distinct
+certificates on simultaneous ports of one HNS hostname.
+
+Concurrent admissions share verification work; cancelling one consumer does not
+cancel another. Certificate probes have an absolute deadline covering both TCP
+and TLS establishment and release their sockets when complete or cancelled.
+Failed admissions are not trusted or cached as successful website results.
+A failed main-frame HTTPS redirect opens an internal status page with Retry
+HTTPS rather than leaving a blank page or a generic `ERR_FAILED` banner.
+Temporary TLSA failure never opens an agent manifest and never silently
+downgrades HTTPS. An explicit native HTTP option is available for compatible
+failure states; a published TLSA mismatch still fails closed.
+Retry HTTPS (or Reload) from SkyInclude's generated status page makes a fresh
+TLSA attempt even during the local cooldown. Ordinary links, automatic redirects,
+and background probes do not receive this cooldown bypass.
+Forced revalidation invalidates active admission for that hostname and HTTPS
+port across all resolved addresses. Older in-flight work cannot restore revoked
+TLSA data or admission after the refresh.
 
 Many early HNS websites do not publish TLSA records. Missing TLSA records do not break ordinary HNS browsing: `http://<name>` can still load through the local HNS HTTP proxy. If a user asks for `https://<name>` and no TLSA record exists, the browser describes that as not DANE verified and offers an explicit compatibility fallback to native HNS HTTP. If a TLSA record exists but does not match the server certificate, the browser fails closed instead of silently downgrading.
 
@@ -203,3 +301,10 @@ For a manual smoke test:
 4. Temporarily use an unreachable first endpoint and confirm the second endpoint answers.
 5. Repeat a second HNS lookup within 30 seconds and confirm the failed first endpoint is skipped without another full-timeout delay.
 6. If DANE is enabled, verify a matching TLSA record succeeds and a published mismatch still fails closed.
+7. From a cold session, open `http://handshake.mercenary/` and verify its HTTPS
+   redirect renders the native site with DANE verification, without pre-opening
+   HTTPS. Repeat with an isolated POST 307/308 fixture and inspect the received
+   method/body, Host header, SNI, and path/query.
+8. In an isolated profile, make all TLSA resolvers unavailable, confirm the
+   internal status page, then restore them, clear resolver cooldown/cache, and
+   Retry HTTPS. Confirm recovery without a manifest redirect or insecure bypass.

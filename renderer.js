@@ -5,6 +5,8 @@ class SkyIncludeRenderer {
         this.tabs = new Map();
         this.activeTabId = null;
         this.currentUrl = '';
+        this.addressBarTabId = null;
+        this.addressBarDisplayValue = '';
         this.navigationRequestId = 0;
         this.isLoading = false;
         this.securityPopoverOpen = false;
@@ -23,6 +25,7 @@ class SkyIncludeRenderer {
         this.addressBar = document.getElementById('address-bar');
         this.loadingIndicator = document.getElementById('loading-indicator');
         this.securityIndicator = document.getElementById('security-indicator');
+        this.resolverBadge = document.getElementById('hns-resolver-badge');
         this.hostingIndicator = document.getElementById('hosting-indicator');
         this.hnsProfileBtn = document.getElementById('hns-profile-btn');
         this.hnsProfilePopover = document.getElementById('hns-profile-popover');
@@ -71,6 +74,19 @@ class SkyIncludeRenderer {
             this.addressBar.select();
         });
 
+        this.addressBar.addEventListener('blur', () => {
+            this.updateAddressBar(this.currentUrl, { force: true });
+        });
+
+        this.addressBar.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && this.hasAddressDraft()) {
+                e.preventDefault();
+                e.stopPropagation();
+                this.updateAddressBar(this.currentUrl, { force: true });
+                this.addressBar.select();
+            }
+        });
+
         this.addressBar.addEventListener('contextmenu', async (e) => {
             e.preventDefault();
             try {
@@ -90,6 +106,10 @@ class SkyIncludeRenderer {
         this.securityIndicator.addEventListener('click', (e) => {
             e.stopPropagation();
             this.toggleSecurityPopover();
+        });
+        this.resolverBadge.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this.showSecurityPopover(this.resolverBadge);
         });
 
         this.hnsProfileBtn.addEventListener('click', (e) => {
@@ -237,6 +257,7 @@ class SkyIncludeRenderer {
                     this.activeTabId = activeTab.id;
                     this.updateAddressBar(activeTab.url);
                     this.updateSecurityIndicator(activeTab.url, activeTab.hostingProvider, activeTab.securityInfo);
+                    this.updateResolverBadge(activeTab.resolverInfo);
                     this.updateHostingIndicator(activeTab.hostingProvider);
                     this.updateHnsProfileIndicator(activeTab.hnsProfile);
                     if (activeTab.url === 'skyinclude://home') {
@@ -269,6 +290,10 @@ class SkyIncludeRenderer {
     async navigateToUrl(url) {
         if (!url.trim()) return;
         const requestId = ++this.navigationRequestId;
+        // Enter (or another explicit navigation) ends this draft. Set the
+        // baseline before IPC so redirects update normally, but a new edit
+        // made while navigation is pending is still protected.
+        this.addressBarDisplayValue = this.addressBar.value;
         
         try {
             this.showLoading(true);
@@ -356,6 +381,7 @@ class SkyIncludeRenderer {
         this.updateNavigationButtons(data.canGoBack, data.canGoForward);
         this.showLoading(data.loading);
         this.updateSecurityIndicator(data.url, data.hostingProvider, data.securityInfo);
+        this.updateResolverBadge(data.resolverInfo);
         this.updateHostingIndicator(data.hostingProvider);
         this.updateHnsProfileIndicator(data.hnsProfile);
         if (data.url === 'skyinclude://home') {
@@ -363,9 +389,22 @@ class SkyIncludeRenderer {
         }
     }
 
-    updateAddressBar(url) {
+    hasAddressDraft() {
+        return document.activeElement === this.addressBar &&
+            this.addressBar.value !== this.addressBarDisplayValue;
+    }
+
+    updateAddressBar(url, { force = false } = {}) {
+        const changingTab = this.addressBarTabId !== null && this.addressBarTabId !== this.activeTabId;
+        const preserveDraft = !force && !changingTab && this.hasAddressDraft();
+        // Page state must advance even while the user edits the field. Keep a
+        // separate display baseline: late Home/loading/metadata updates are
+        // not permission to replace the focused, unsubmitted address.
         this.currentUrl = url;
-        this.addressBar.value = url === 'skyinclude://home' ? '' : url;
+        this.addressBarTabId = this.activeTabId;
+        if (preserveDraft) return;
+        this.addressBarDisplayValue = url === 'skyinclude://home' ? '' : url;
+        this.addressBar.value = this.addressBarDisplayValue;
     }
 
     updateNavigationButtons(canGoBack, canGoForward) {
@@ -389,6 +428,7 @@ class SkyIncludeRenderer {
             if (Object.prototype.hasOwnProperty.call(data, 'hnsProfile')) {
                 this.updateHnsProfileIndicator(data.hnsProfile);
             }
+            if (Object.prototype.hasOwnProperty.call(data, 'resolverInfo')) this.updateResolverBadge(data.resolverInfo);
         }
         
         // Update tab loading state
@@ -404,6 +444,7 @@ class SkyIncludeRenderer {
             if (Object.prototype.hasOwnProperty.call(data, 'securityInfo')) {
                 tab.securityInfo = data.securityInfo;
             }
+            if (Object.prototype.hasOwnProperty.call(data, 'resolverInfo')) tab.resolverInfo = data.resolverInfo;
             if (Object.prototype.hasOwnProperty.call(data, 'favicon')) {
                 tab.favicon = data.favicon;
             }
@@ -507,9 +548,9 @@ class SkyIncludeRenderer {
         this.hideSecurityPopover();
     }
 
-    async showSecurityPopover() {
+    async showSecurityPopover(anchor = this.securityIndicator) {
         const info = this.currentSecurityInfo || this.deriveSecurityInfo(this.currentUrl);
-        const rect = this.securityIndicator.getBoundingClientRect();
+        const rect = anchor.getBoundingClientRect();
 
         try {
             await window.electronAPI.showSecurityPopover({
@@ -652,9 +693,25 @@ class SkyIncludeRenderer {
             this.updateAddressBar(tab.url);
             this.updateNavigationButtons(tab.canGoBack, tab.canGoForward);
             this.updateSecurityIndicator(tab.url, tab.hostingProvider, tab.securityInfo);
+            this.updateResolverBadge(tab.resolverInfo);
             this.updateHostingIndicator(tab.hostingProvider);
             this.updateHnsProfileIndicator(tab.hnsProfile);
         }
+    }
+
+    updateResolverBadge(info) {
+        const lookup = info?.website;
+        if (!info?.domain) {
+            this.resolverBadge.classList.add('hidden');
+            this.resolverBadge.textContent = '';
+            return;
+        }
+        const label = lookup?.resolver?.name ? `DNS: ${lookup.resolver.name}`
+            : lookup?.notConfigured ? 'DNS: not configured' : lookup?.state === 'temporary-failure' ? 'DNS unavailable' : 'DNS details';
+        this.resolverBadge.textContent = label;
+        this.resolverBadge.title = `${label} — website DNS and HTTPS identity lookup details`;
+        this.resolverBadge.setAttribute('aria-label', this.resolverBadge.title);
+        this.resolverBadge.classList.remove('hidden');
     }
 
     updateHnsProfileIndicator(profile) {
@@ -746,9 +803,12 @@ class SkyIncludeRenderer {
     }
 
     focusAddressBar() {
+        const tabId = this.activeTabId;
+        const requestId = this.navigationRequestId;
         setTimeout(() => {
+            if (this.activeTabId !== tabId || this.navigationRequestId !== requestId ||
+                document.activeElement === this.addressBar) return;
             this.addressBar.focus();
-            this.addressBar.select();
         }, 0);
     }
 

@@ -3,11 +3,61 @@ const path = require('path');
 const { app } = require('electron');
 const {
     BUILT_IN_RESOLVERS,
+    ARCHIVED_RESOLVERS,
+    isRetiredResolver,
     normalizeResolverDescriptor,
-    normalizeResolverList
+    normalizeResolverList,
+    normalizeResolverUrl,
+    parseResolverString
 } = require('./resolver-config.js');
 
-const HNS_RESOLVER_DEFAULTS_VERSION = 3;
+const HNS_RESOLVER_DEFAULTS_VERSION = 4;
+const LEGACY_HNSDOH = { id: 'hnsdoh', name: 'HNS DoH', transport: 'doh-wire', url: 'https://hnsdoh.com/dns-query' };
+const LEGACY_WEB3DNS = { id: 'web3dns', name: 'Web3DNS', transport: 'dns-json', url: 'https://api.web3dns.net/' };
+const LEGACY_DEFAULTS = {
+    0: [LEGACY_HNSDOH],
+    1: [LEGACY_HNSDOH],
+    2: [LEGACY_HNSDOH, LEGACY_WEB3DNS],
+    3: [LEGACY_HNSDOH, LEGACY_WEB3DNS, ARCHIVED_RESOLVERS[0]]
+};
+
+function isUntouchedLegacyList(inputs, version) {
+    const expected = LEGACY_DEFAULTS[version];
+    return Boolean(expected && Array.isArray(inputs) && inputs.length === expected.length &&
+        inputs.every((input, index) => {
+            const raw = typeof input === 'string' ? parseResolverString(input) : input;
+            const entry = expected[index];
+            if (!raw || raw.enabled === false || (raw.id && raw.id !== entry.id) ||
+                (raw.name && raw.name !== entry.name)) return false;
+            const transport = raw.transport || entry.transport;
+            return transport === entry.transport &&
+                normalizeResolverUrl(String(raw.url || raw.endpoint || '').trim(), transport) === entry.url;
+        }));
+}
+
+function normalizeSavedResolvers(inputs) {
+    const seen = new Set();
+    return (Array.isArray(inputs) ? inputs : []).flatMap((input, index) => {
+        const disabled = input && typeof input === 'object' && input.enabled === false;
+        const resolver = normalizeResolverDescriptor(disabled ? { ...input, enabled: true } : input, index);
+        if (!resolver) return [];
+        const key = `${resolver.transport}|${resolver.url}|${disabled ? 'disabled' : 'enabled'}`.toLowerCase();
+        if (seen.has(key)) return [];
+        seen.add(key);
+        return [{ ...resolver, enabled: !disabled }];
+    });
+}
+
+function retirementNotice(resolvers, customResolver) {
+    const requiresResolverSelection = !normalizeResolverList([customResolver, ...resolvers]).length;
+    return {
+        id: 'shakestation-retired',
+        title: 'Shakestation retired',
+        message: 'Shakestation has permanently retired its public HNS resolver and was removed from your active configuration.' +
+            (requiresResolverSelection ? ' Choose an active HNS resolver to resume native name resolution.' : ''),
+        requiresResolverSelection
+    };
+}
 
 class SettingsManager {
     constructor() {
@@ -17,6 +67,7 @@ class SettingsManager {
             hnsResolutionMode: 'doh', // DNS-over-HTTPS; no bundled P2P client yet.
             hnsResolvers: normalizeResolverList(BUILT_IN_RESOLVERS),
             hnsResolverDefaultsVersion: HNS_RESOLVER_DEFAULTS_VERSION,
+            hnsResolverRetirementNotice: null,
             hnsCustomResolver: '',
             hnsTimeout: 4000,
             hnsDANE: false,
@@ -103,25 +154,29 @@ class SettingsManager {
     migrateHnsResolverSettings() {
         const before = JSON.stringify({
             resolvers: this.settings.hnsResolvers || [],
-            version: this.settings.hnsResolverDefaultsVersion
+            version: this.settings.hnsResolverDefaultsVersion,
+            customResolver: this.settings.hnsCustomResolver,
+            notice: this.settings.hnsResolverRetirementNotice
         });
-        const normalized = normalizeResolverList(this.settings.hnsResolvers || []);
+        const inputs = Array.isArray(this.settings.hnsResolvers) ? this.settings.hnsResolvers : [];
         const currentVersion = Number(this.settings.hnsResolverDefaultsVersion) || 0;
-        const isLegacyDefault = normalized.length === 1 && normalized[0].id === 'hnsdoh';
-        const previousBuiltIns = BUILT_IN_RESOLVERS.slice(0, 2);
-        const isPreviousDefault = normalized.length === previousBuiltIns.length
-            && normalized.every((resolver, index) => (
-                resolver.transport === previousBuiltIns[index].transport
-                && resolver.url === previousBuiltIns[index].url
-            ));
-        this.settings.hnsResolvers = currentVersion < HNS_RESOLVER_DEFAULTS_VERSION
-            && (isLegacyDefault || isPreviousDefault)
+        const retired = inputs.some(isRetiredResolver) || isRetiredResolver(this.settings.hnsCustomResolver);
+        const untouched = !String(this.settings.hnsCustomResolver || '').trim() &&
+            isUntouchedLegacyList(inputs, currentVersion);
+        this.settings.hnsResolvers = untouched
             ? normalizeResolverList(BUILT_IN_RESOLVERS)
-            : normalized;
+            : normalizeSavedResolvers(inputs);
+        if (isRetiredResolver(this.settings.hnsCustomResolver)) this.settings.hnsCustomResolver = '';
+        if (retired || this.settings.hnsResolverRetirementNotice?.id === 'shakestation-retired') {
+            this.settings.hnsResolverRetirementNotice = retirementNotice(
+                this.settings.hnsResolvers, this.settings.hnsCustomResolver);
+        }
         this.settings.hnsResolverDefaultsVersion = HNS_RESOLVER_DEFAULTS_VERSION;
         return before !== JSON.stringify({
             resolvers: this.settings.hnsResolvers,
-            version: this.settings.hnsResolverDefaultsVersion
+            version: this.settings.hnsResolverDefaultsVersion,
+            customResolver: this.settings.hnsCustomResolver,
+            notice: this.settings.hnsResolverRetirementNotice
         });
     }
 
@@ -238,14 +293,23 @@ class SettingsManager {
 
         if (typeof settings.hnsCustomResolver === 'string') {
             const customResolver = settings.hnsCustomResolver.trim();
-            if (!customResolver || normalizeResolverDescriptor(customResolver)) {
+            if (isRetiredResolver(customResolver)) {
+                validated.hnsCustomResolver = '';
+            } else if (!customResolver || normalizeResolverDescriptor(customResolver)) {
                 validated.hnsCustomResolver = customResolver;
             }
         }
         
         // Validate array settings
         if (Array.isArray(settings.hnsResolvers)) {
-            validated.hnsResolvers = normalizeResolverList(settings.hnsResolvers);
+            validated.hnsResolvers = normalizeSavedResolvers(settings.hnsResolvers);
+        }
+        if (isRetiredResolver(settings.hnsCustomResolver) ||
+            (Array.isArray(settings.hnsResolvers) && settings.hnsResolvers.some(isRetiredResolver)) ||
+            this.settings.hnsResolverRetirementNotice?.id === 'shakestation-retired') {
+            validated.hnsResolverRetirementNotice = retirementNotice(
+                validated.hnsResolvers ?? this.settings.hnsResolvers ?? [],
+                validated.hnsCustomResolver ?? this.settings.hnsCustomResolver ?? '');
         }
         
         return validated;
@@ -285,7 +349,9 @@ class SettingsManager {
             const importedSettings = JSON.parse(settingsData);
             const validatedSettings = this.validateSettings(importedSettings);
             
-            const success = this.updateSettings(validatedSettings);
+            // Validate from the original import when applying it so retirement
+            // detection is not lost after an earlier normalization removed it.
+            const success = this.updateSettings(importedSettings);
             
             if (success) {
                 console.log('Settings imported successfully');

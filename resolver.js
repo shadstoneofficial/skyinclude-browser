@@ -95,6 +95,8 @@ class HNSResolver {
         this.pendingResolutions = new Map();
         this.cacheGeneration = 0;
         this.tlsaCache = new Map();
+        this.pendingTLSAResolutions = new Map();
+        this.tlsaRevisions = new Map();
         this.tlsaCacheTimeout = 300000;
         this.resolverHealth = new Map();
         this.resolverDiagnostics = [];
@@ -110,7 +112,9 @@ class HNSResolver {
             };
         }
 
-        const resolvers = normalizeResolverList(this.settingsManager.getSetting('hnsResolvers') || []);
+        const configuredResolvers = this.settingsManager.getSetting('hnsResolvers');
+        const resolvers = normalizeResolverList(Array.isArray(configuredResolvers)
+            ? configuredResolvers : this.settings.resolvers);
         const customResolver = this.settingsManager.getSetting('hnsCustomResolver');
         const candidates = normalizeResolverList([
             customResolver,
@@ -124,8 +128,8 @@ class HNSResolver {
 
         return {
             resolutionMode: this.settingsManager.getSetting('hnsResolutionMode') || 'doh',
-            resolvers: candidates.length ? candidates : normalizeResolverList(this.settings.resolvers),
-            dohResolver: candidates.find(resolver => resolver.transport === 'doh-wire')?.url || this.settings.dohResolver,
+            resolvers: candidates,
+            dohResolver: candidates.find(resolver => resolver.transport === 'doh-wire')?.url || null,
             headlessLookupBase: this.settings.headlessLookupBase,
             timeout,
             enableDANE: this.settingsManager.getSetting('hnsDANE') === true
@@ -151,8 +155,8 @@ class HNSResolver {
         const available = [];
         const cooling = [];
         candidates.forEach((resolver, configuredIndex) => {
-            const health = this.resolverHealth.get(this.getResolverKey(resolver));
-            if (health && health.retryAt > now) {
+            const health = this.resolverHealth.get(this.getResolverHealthKey(resolver, options.healthScope));
+            if (!options.ignoreCooldown && health && health.retryAt > now) {
                 cooling.push({ resolver, configuredIndex, retryAt: health.retryAt });
             } else {
                 available.push({ resolver, configuredIndex });
@@ -175,13 +179,58 @@ class HNSResolver {
         return `${resolver.transport}|${resolver.url}`.toLowerCase();
     }
 
+    getResolverHealthKey(resolver, scope = '') {
+        return `${this.getResolverKey(resolver)}${scope ? `|${scope}` : ''}`;
+    }
+
     getPublicResolverInfo(resolver) {
         return resolver ? {
             id: resolver.id,
             name: resolver.name,
             transport: resolver.transport,
-            url: resolver.url
+            url: this.getPublicResolverUrl(resolver.url)
         } : null;
+    }
+
+    getPublicResolverUrl(value) {
+        try {
+            const url = new URL(value);
+            if (!['http:', 'https:'].includes(url.protocol)) return '';
+            url.username = '';
+            url.password = '';
+            url.search = '';
+            url.hash = '';
+            return url.toString();
+        } catch (error) {
+            return '';
+        }
+    }
+
+    getPublicResolverMessage(value, resolver = null) {
+        let message = String(value || '').replace(/https?:\/\/[^\s"'<>]+/gi,
+            url => this.getPublicResolverUrl(url) || '[resolver endpoint]');
+        // Providers can echo a query token outside its URL in an error body.
+        // Such details are not needed in diagnostics or connection information.
+        if (resolver?.url) {
+            try {
+                const url = new URL(resolver.url);
+                const privateValues = [url.username, url.password, url.hash.slice(1), ...url.searchParams.values()];
+                for (const secret of privateValues.filter(Boolean)) {
+                    for (const representation of new Set([secret, encodeURIComponent(secret)])) {
+                        message = message.split(representation).join('[redacted]');
+                    }
+                }
+            } catch (error) { /* Invalid URLs have no publishable endpoint. */ }
+        }
+        return message;
+    }
+
+    getPublicResolverAttempts(attempts) {
+        return (Array.isArray(attempts) ? attempts : []).map(attempt => ({
+            ...attempt,
+            resolver: this.getPublicResolverInfo(attempt.resolver),
+            ...(attempt.message ? { message: this.getPublicResolverMessage(attempt.message, attempt.resolver) } : {})
+        }));
     }
 
     recordResolverDiagnostic(event) {
@@ -194,25 +243,27 @@ class HNSResolver {
         }
     }
 
-    markResolverFailure(resolver, error, elapsedMs) {
-        const key = this.getResolverKey(resolver);
+    markResolverFailure(resolver, error, elapsedMs, healthScope = '') {
+        const key = this.getResolverHealthKey(resolver, healthScope);
         this.resolverHealth.set(key, {
             retryAt: Date.now() + this.resolverCooldownMs,
             error: error.message
         });
         this.recordResolverDiagnostic({
             event: 'failure',
+            recordScope: healthScope || 'website',
             resolver: this.getPublicResolverInfo(resolver),
             elapsedMs,
             status: error.rcodeName || error.code || 'ERROR',
-            message: error.message
+            message: this.getPublicResolverMessage(error.message, resolver)
         });
     }
 
-    markResolverSuccess(resolver, elapsedMs, rcodeName, fallbackCount) {
-        this.resolverHealth.delete(this.getResolverKey(resolver));
+    markResolverSuccess(resolver, elapsedMs, rcodeName, fallbackCount, healthScope = '') {
+        this.resolverHealth.delete(this.getResolverHealthKey(resolver, healthScope));
         this.recordResolverDiagnostic({
             event: 'success',
+            recordScope: healthScope || 'website',
             resolver: this.getPublicResolverInfo(resolver),
             elapsedMs,
             status: rcodeName,
@@ -252,16 +303,35 @@ class HNSResolver {
         if (cached && cached.configurationKey === configurationKey
             && Date.now() - cached.timestamp < this.cacheTimeout) {
             console.log('HNS resolution cache hit');
-            return cached.result;
+            const result = {
+                ...cached.result,
+                resolver: this.getPublicResolverInfo(cached.result.resolver),
+                resolverAttempts: this.getPublicResolverAttempts(cached.result.resolverAttempts),
+                cacheHit: true
+            };
+            if (cached.result.profilePromise) {
+                const profilePromise = cached.result.profilePromise.then(profile => {
+                    result.hnsProfile = profile;
+                    return profile;
+                });
+                Object.defineProperty(result, 'profilePromise', { value: profilePromise, enumerable: false });
+            }
+            return result;
         }
 
-        const pendingKey = `${configurationKey}|${cacheKey}`;
+        // A trusted explicit Retry must not join an ordinary producer whose
+        // resolver candidates have already been excluded by cooldown.
+        const ignoreCooldown = options.ignoreCooldown === true;
+        const pendingKey = `${configurationKey}|${cacheKey}|${ignoreCooldown ? 'retry' : 'normal'}`;
         let pending = this.pendingResolutions.get(pendingKey);
         if (!pending) {
             const controller = new AbortController();
             pending = { controller, consumers: 0, settled: false };
             const generation = this.cacheGeneration;
-            pending.promise = this.resolveUncachedDomain(cleanDomain, { signal: controller.signal })
+            pending.promise = this.resolveUncachedDomain(cleanDomain, {
+                signal: controller.signal,
+                ignoreCooldown
+            })
                 .then(result => {
                     if (result && result.resolutionState !== 'temporary-failure'
                         && !controller.signal.aborted && generation === this.cacheGeneration) {
@@ -280,7 +350,7 @@ class HNSResolver {
         return this.joinPendingResolution(pendingKey, pending, options.signal);
     }
 
-    joinPendingResolution(pendingKey, pending, signal) {
+    joinPendingResolution(pendingKey, pending, signal, pendingStore = this.pendingResolutions) {
         pending.consumers += 1;
         return new Promise((resolve, reject) => {
             let completed = false;
@@ -296,8 +366,8 @@ class HNSResolver {
                 finish(this.createAbortError());
                 // A superseded tab must not cancel another tab's shared lookup.
                 if (!pending.settled && pending.consumers === 0) {
-                    if (this.pendingResolutions.get(pendingKey) === pending) {
-                        this.pendingResolutions.delete(pendingKey);
+                    if (pendingStore.get(pendingKey) === pending) {
+                        pendingStore.delete(pendingKey);
                     }
                     pending.controller.abort();
                 }
@@ -424,13 +494,14 @@ class HNSResolver {
     buildTemporaryResolutionResult(domain, error) {
         return {
             domain,
+            ...this.getFailedResolutionMetadata(domain, ['A', 'AAAA', 'CNAME'], error),
             source: 'hns-resolver',
             resolutionState: 'temporary-failure',
             temporaryFailure: true,
             error: {
                 code: error?.code || error?.rcodeName || 'RESOLVER_FAILURE',
-                message: error?.message || 'HNS resolution temporarily failed',
-                attempts: Array.isArray(error?.attempts) ? error.attempts : []
+                message: this.getPublicResolverMessage(error?.message || 'HNS resolution temporarily failed'),
+                attempts: this.getPublicResolverAttempts(error?.attempts)
             },
             headlessLinks: this.isHeadlessDomain(domain) ? this.getHeadlessLinks(domain) : null,
             records: {}
@@ -467,6 +538,7 @@ class HNSResolver {
 
             const result = {
                 domain,
+                ...this.getResolutionMetadata(websiteResponse),
                 source: 'headlessdomains',
                 resolutionState: 'authoritative-absence',
                 url: redirectUrl || `https://headlessdomains.com/${domain}`,
@@ -538,12 +610,37 @@ class HNSResolver {
 
     getResolutionMetadata(response) {
         const resolver = this.getPublicResolverInfo(response?.resolver);
+        const recordTypes = [...(response?.recordTypes || [])];
+        const hasRecords = Array.isArray(response?.records) ? response.records.length > 0
+            : recordTypes.some(type => response?.records?.[type]?.length > 0);
         return {
             source: resolver ? `hns:${resolver.id}` : 'hns-resolver',
             resolver,
-            resolverFallbackCount: response?.fallbackCount || 0,
-            resolverAttempts: Array.isArray(response?.attempts) ? response.attempts : []
+            resolverFallbackCount: response?.resolverFallbackCount ?? response?.fallbackCount ?? 0,
+            resolverAttempts: this.getPublicResolverAttempts(response?.resolverAttempts || response?.attempts),
+            cacheHit: response?.cacheHit === true,
+            authenticated: response?.authenticated === true,
+            queryName: response?.queryName || response?.domain || null,
+            recordTypes,
+            rcode: Number.isInteger(response?.rcode) ? response.rcode : null,
+            rcodeName: response?.rcodeName || null,
+            elapsedMs: response?.elapsedMs ?? null,
+            resolverResolutionState: response?.resolverResolutionState || (
+                response?.rcode === 0 || response?.rcode === 3
+                    ? (hasRecords ? 'resolved' : 'authoritative-absence') : 'unknown'
+            )
         };
+    }
+
+    getFailedResolutionMetadata(domain, recordTypes, error) {
+        return this.getResolutionMetadata({
+            domain: error?.queryName || domain,
+            recordTypes: error?.recordTypes || recordTypes,
+            attempts: error?.resolverAttempts || error?.attempts,
+            rcode: error?.rcode,
+            rcodeName: error?.rcodeName || error?.code || 'RESOLVER_FAILURE',
+            resolverResolutionState: 'temporary-failure'
+        });
     }
 
     buildCnameResult(domain, records, hnsProfile = null, response = null) {
@@ -636,7 +733,10 @@ class HNSResolver {
         this.throwIfAborted(options.signal);
         const optionalTypes = [...new Set(options.optionalTypes || [])]
             .filter(type => DNS_TYPES[type] && !requestedTypes.includes(type));
-        const candidateState = this.getResolverCandidateState(options);
+        // A TLSA capability or DNSSEC failure must not cool down an otherwise
+        // healthy website resolver, nor inherit a previous website cooldown.
+        const healthScope = requestedTypes.includes('TLSA') ? 'TLSA' : '';
+        const candidateState = this.getResolverCandidateState({ ...options, healthScope });
         const attempts = candidateState.cooling.map(candidate => ({
             resolver: this.getPublicResolverInfo(candidate.resolver),
             status: 'COOLDOWN',
@@ -645,9 +745,12 @@ class HNSResolver {
             retryAt: new Date(candidate.retryAt).toISOString()
         }));
         if (!candidateState.available.length) {
-            const error = new Error('All configured HNS resolvers are temporarily cooling down');
-            error.code = 'RESOLVER_COOLDOWN';
+            const error = new Error(candidateState.candidates.length
+                ? 'All configured HNS resolvers are temporarily cooling down'
+                : 'No HNS resolver is configured; choose a resolver in Settings');
+            error.code = candidateState.candidates.length ? 'RESOLVER_COOLDOWN' : 'NO_HNS_RESOLVERS';
             error.attempts = attempts;
+            Object.assign(error, this.getFailedResolutionMetadata(cleanDomain, requestedTypes, error));
             throw error;
         }
 
@@ -661,6 +764,11 @@ class HNSResolver {
             let optionalRecordsPromise = null;
             try {
                 this.throwIfAborted(options.signal);
+                if (options.requireAuthenticated && new URL(resolver.url).protocol !== 'https:') {
+                    const error = new Error('TLSA verification requires an authenticated HTTPS resolver connection');
+                    error.code = 'INSECURE_TLSA_TRANSPORT';
+                    throw error;
+                }
                 let optionalRecords = null;
                 if (optionalTypes.length) {
                     // Always observe optional failures, even after a native
@@ -678,7 +786,25 @@ class HNSResolver {
                             rcode
                         };
                         return optionalRecords;
-                    }).catch(error => ({ error, records: {}, rcode: null }));
+                    }).catch(error => {
+                        // Optional TXT may finish after website absence was
+                        // established. Retain that request's provider while
+                        // stripping any secret echoed outside an endpoint URL.
+                        const publicError = new Error(this.getPublicResolverMessage(error.message, resolver));
+                        publicError.name = error.name;
+                        publicError.code = error.code;
+                        publicError.rcode = error.rcode;
+                        publicError.rcodeName = error.rcodeName;
+                        publicError.attempts = [{
+                            resolver: this.getPublicResolverInfo(resolver),
+                            status: error.rcodeName || error.code || 'ERROR',
+                            elapsedMs: Date.now() - startedAt,
+                            configuredIndex,
+                            message: publicError.message
+                        }];
+                        Object.assign(publicError, this.getFailedResolutionMetadata(cleanDomain, optionalTypes, publicError));
+                        return { error: publicError, records: {}, rcode: null };
+                    });
                 }
                 const responses = await Promise.all(requestedTypes.map(typeName =>
                     this.queryResolver(resolver, cleanDomain, typeName, timeout, { signal: controller.signal })
@@ -693,6 +819,12 @@ class HNSResolver {
                 if (rcode !== 0 && rcode !== 3) {
                     throw this.createDnsResponseError(rcode);
                 }
+                const authenticated = responses.every(response => response.authenticated === true);
+                if (options.requireAuthenticated && !authenticated) {
+                    const error = new Error('HNS resolver did not authenticate the TLSA answer with DNSSEC');
+                    error.code = 'DNSSEC_UNAUTHENTICATED';
+                    throw error;
+                }
 
                 const records = Object.fromEntries([...requestedTypes, ...optionalTypes].map(type => [type, []]));
                 responses.forEach((response, responseIndex) => {
@@ -700,7 +832,7 @@ class HNSResolver {
                 });
                 if (optionalRecords?.rcode === rcode) Object.assign(records, optionalRecords.records);
                 const elapsedMs = Date.now() - startedAt;
-                this.markResolverSuccess(resolver, elapsedMs, this.getRcodeName(rcode), configuredIndex);
+                this.markResolverSuccess(resolver, elapsedMs, this.getRcodeName(rcode), configuredIndex, healthScope);
                 attempts.push({
                     resolver: this.getPublicResolverInfo(resolver),
                     status: this.getRcodeName(rcode),
@@ -709,10 +841,12 @@ class HNSResolver {
                 });
                 return {
                     domain: cleanDomain,
+                    recordTypes: requestedTypes,
                     records,
                     rcode,
                     rcodeName: this.getRcodeName(rcode),
-                    resolver,
+                    authenticated,
+                    resolver: this.getPublicResolverInfo(resolver),
                     fallbackCount: configuredIndex,
                     elapsedMs,
                     attempts: attempts.sort((left, right) => left.configuredIndex - right.configuredIndex),
@@ -723,15 +857,15 @@ class HNSResolver {
                 controller.abort();
                 if (error.name === 'AbortError' || options.signal?.aborted) throw this.createAbortError();
                 const elapsedMs = Date.now() - startedAt;
-                this.markResolverFailure(resolver, error, elapsedMs);
+                this.markResolverFailure(resolver, error, elapsedMs, healthScope);
                 attempts.push({
                     resolver: this.getPublicResolverInfo(resolver),
                     status: error.rcodeName || error.code || 'ERROR',
                     elapsedMs,
                     configuredIndex,
-                    message: error.message
+                    message: this.getPublicResolverMessage(error.message, resolver)
                 });
-                failures.push(`${resolver.id}: ${error.message}`);
+                failures.push(`${resolver.id}: ${this.getPublicResolverMessage(error.message, resolver)}`);
             } finally {
                 if (optionalRecordsPromise) {
                     optionalRecordsPromise.then(() => options.signal?.removeEventListener('abort', abort));
@@ -744,6 +878,7 @@ class HNSResolver {
         const error = new Error(failures.join('; ') || `No HNS resolver available for ${cleanDomain}`);
         error.code = 'RESOLVER_FAILURE';
         error.attempts = attempts.sort((left, right) => left.configuredIndex - right.configuredIndex);
+        Object.assign(error, this.getFailedResolutionMetadata(cleanDomain, requestedTypes, error));
         throw error;
     }
 
@@ -802,6 +937,10 @@ class HNSResolver {
         const url = new URL(resolver.url);
         url.searchParams.set('name', this.normalizeDomain(domain));
         url.searchParams.set('type', typeName);
+        if (typeName === 'TLSA') {
+            url.searchParams.set('do', 'true');
+            url.searchParams.set('cd', 'false');
+        }
         const data = await this.fetchJson(url.toString(), timeout, {
             Accept: 'application/dns-json',
             'User-Agent': 'SkyInclude/1.0.0'
@@ -841,7 +980,8 @@ class HNSResolver {
         return {
             records,
             rcode,
-            rcodeName: this.getRcodeName(rcode)
+            rcodeName: this.getRcodeName(rcode),
+            authenticated: data.AD === true && data.CD !== true
         };
     }
 
@@ -929,8 +1069,14 @@ class HNSResolver {
         const queryId = Math.floor(Math.random() * 65535);
         const header = Buffer.alloc(12);
         header.writeUInt16BE(queryId, 0);
-        header.writeUInt16BE(0x0100, 2);
+        // Ask the validating recursive resolver for authenticated data (AD)
+        // and DNSSEC records (EDNS DO), without disabling validation (CD).
+        // This advertises DNSSEC support and exposes the validation status
+        // needed before trusting a TLSA certificate match. Upstream transport
+        // failures remain retryable regardless of these request flags.
+        header.writeUInt16BE(0x0120, 2);
         header.writeUInt16BE(1, 4);
+        header.writeUInt16BE(1, 10);
 
         const labels = [];
         for (const part of cleanName.split('.')) {
@@ -943,7 +1089,8 @@ class HNSResolver {
         tail.writeUInt16BE(qtype, 0);
         tail.writeUInt16BE(1, 2);
 
-        return Buffer.concat([header, ...labels, tail]);
+        const edns = Buffer.from('00002904d0000080000000', 'hex');
+        return Buffer.concat([header, ...labels, tail, edns]);
     }
 
     parseDnsResponse(buffer, typeName) {
@@ -961,6 +1108,7 @@ class HNSResolver {
         const qdcount = buffer.readUInt16BE(4);
         const ancount = buffer.readUInt16BE(6);
         const rcode = flags & 0x000f;
+        const authenticated = (flags & 0x0020) !== 0 && (flags & 0x0010) === 0;
         const results = [];
 
         if ((flags & 0x8000) === 0) {
@@ -997,7 +1145,7 @@ class HNSResolver {
             throw this.createDnsResponseError(rcode);
         }
         if (rcode === 3) {
-            return { records: [], rcode, rcodeName: this.getRcodeName(rcode) };
+            return { records: [], rcode, rcodeName: this.getRcodeName(rcode), authenticated };
         }
 
         let parsedAnswers = 0;
@@ -1052,7 +1200,8 @@ class HNSResolver {
         return {
             records: results.filter(Boolean),
             rcode,
-            rcodeName: this.getRcodeName(rcode)
+            rcodeName: this.getRcodeName(rcode),
+            authenticated
         };
     }
 
@@ -1142,35 +1291,84 @@ class HNSResolver {
         };
     }
 
-    buildTlsaName(domain) {
-        return `_443._tcp.${this.normalizeDomain(domain)}`;
+    buildTlsaName(domain, port = 443) {
+        const servicePort = Number(port);
+        if (!Number.isInteger(servicePort) || servicePort < 1 || servicePort > 65535) {
+            throw new Error('Invalid TLSA service port');
+        }
+        return `_${servicePort}._tcp.${this.normalizeDomain(domain)}`;
     }
 
     async resolveTLSARecords(domain, options = {}) {
-        const tlsaName = this.buildTlsaName(domain);
+        this.throwIfAborted(options.signal);
+        const tlsaName = this.buildTlsaName(domain, options.port);
         const candidateKey = normalizeResolverList([
             options.resolver,
             options.dohResolver,
             ...this.getResolverSettings().resolvers
         ]).map(resolver => this.getResolverKey(resolver)).join(',');
         const cacheKey = `${candidateKey}|${tlsaName}`.toLowerCase();
+        if (options.force) {
+            // Refresh revokes old trust immediately, even if every resolver
+            // subsequently fails. An older request cannot restore that trust.
+            this.tlsaCache.delete(cacheKey);
+            this.pendingTLSAResolutions.get(cacheKey)?.controller.abort();
+            this.pendingTLSAResolutions.delete(cacheKey);
+        }
         const cached = this.tlsaCache.get(cacheKey);
 
-        if (!options.force && cached && Date.now() - cached.timestamp < this.tlsaCacheTimeout) {
-            return cached.records;
+        if (!options.force && cached?.authenticated === true
+            && Date.now() - cached.timestamp < this.tlsaCacheTimeout) {
+            return options.includeMetadata === true ? {
+                records: cached.records,
+                ...this.getResolutionMetadata(cached),
+                resolutionState: cached.resolverResolutionState,
+                cacheHit: true
+            } : cached.records;
         }
 
-        const generation = this.cacheGeneration;
-        const response = await this.queryRecordSet(tlsaName, ['TLSA'], options);
-        const records = response.rcode === 3 ? [] : response.records.TLSA;
-        if (generation === this.cacheGeneration) {
-            this.tlsaCache.set(cacheKey, {
-                records,
-                resolver: this.getPublicResolverInfo(response.resolver),
-                timestamp: Date.now()
+        let pending = this.pendingTLSAResolutions.get(cacheKey);
+        if (!pending || pending.generation !== this.cacheGeneration) {
+            const controller = new AbortController();
+            const revision = Symbol('TLSA request');
+            this.tlsaRevisions.set(cacheKey, revision);
+            pending = { controller, consumers: 0, settled: false, generation: this.cacheGeneration };
+            pending.promise = this.queryRecordSet(tlsaName, ['TLSA'], {
+                ...options,
+                signal: controller.signal,
+                requireAuthenticated: true,
+                ignoreCooldown: options.force === true
+            }).then(response => {
+                // Also reject stale callers if their transport ignored abort.
+                // Merely suppressing the cache write could still authorize an
+                // obsolete certificate in the waiting navigation.
+                if (controller.signal.aborted || this.tlsaRevisions.get(cacheKey) !== revision) {
+                    throw this.createAbortError();
+                }
+                const records = response.rcode === 3 ? [] : response.records.TLSA;
+                const metadata = this.getResolutionMetadata(response);
+                const result = { records, ...metadata, resolutionState: metadata.resolverResolutionState };
+                if (pending.generation === this.cacheGeneration) {
+                    this.tlsaCache.set(cacheKey, {
+                        ...result,
+                        timestamp: Date.now()
+                    });
+                }
+                return result;
+            }).finally(() => {
+                pending.settled = true;
+                if (this.pendingTLSAResolutions.get(cacheKey) === pending) {
+                    this.pendingTLSAResolutions.delete(cacheKey);
+                }
             });
+            this.pendingTLSAResolutions.set(cacheKey, pending);
         }
-        return records;
+        const result = await this.joinPendingResolution(cacheKey, pending, options.signal, this.pendingTLSAResolutions);
+        return options.includeMetadata === true ? {
+            records: result.records,
+            ...this.getResolutionMetadata(result),
+            resolutionState: result.resolverResolutionState
+        } : result.records;
     }
 
     isSupportedTlsaRecord(record) {
@@ -1364,7 +1562,7 @@ class HNSResolver {
 
     async verifyDANE(domain, certificate, options = {}) {
         const cleanDomain = this.normalizeDomain(domain);
-        const tlsaName = this.buildTlsaName(cleanDomain);
+        const tlsaName = this.buildTlsaName(cleanDomain, options.port);
         const baseResult = {
             state: 'disabled',
             domain: cleanDomain,
@@ -1383,7 +1581,7 @@ class HNSResolver {
         try {
             records = Array.isArray(options.records)
                 ? options.records
-                : await this.resolveTLSARecords(cleanDomain);
+                : await this.resolveTLSARecords(cleanDomain, { ...options, includeMetadata: false });
         } catch (error) {
             return {
                 ...baseResult,

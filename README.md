@@ -12,6 +12,7 @@ It resolves HNS names with DNS-over-HTTPS, supports HeadlessDomains agent/chatbo
 - Resolve `.agent` and `.chatbot` names through HeadlessDomains manifests
 - Open new-window links as managed browser tabs
 - Local settings UI for ordered binary-DoH and DNS-JSON resolvers, health testing, and privacy options
+- HNS resolver visibility that separates website lookup from HTTPS identity verification
 
 ## Development
 

@@ -83,6 +83,48 @@ test('pending and cached resolutions are isolated by resolver configuration', as
     assert.equal(calls.length, 8);
 });
 
+test('an explicit website retry cannot join a pending ordinary cooldown result', async () => {
+    const { resolver } = configuredResolver();
+    resolver.markResolverFailure(primary, new Error('earlier outage'), 10);
+    const gate = deferred();
+    let calls = 0;
+    resolver.queryResolver = async (candidate, domain, type) => {
+        calls += 1;
+        await gate.promise;
+        return answer(type === 'A' ? ['168.144.102.205'] : []);
+    };
+
+    const ordinary = resolver.resolveHNSDomain('handshake.mercenary');
+    const retry = resolver.resolveHNSDomain('handshake.mercenary', { ignoreCooldown: true });
+    const secondRetry = resolver.resolveHNSDomain('handshake.mercenary', { ignoreCooldown: true });
+    assert.equal(calls, 4, 'only retries query the cooling endpoint, and share their producer');
+    assert.equal(resolver.pendingResolutions.size, 2);
+    assert.equal((await ordinary).error.code, 'RESOLVER_COOLDOWN');
+    gate.resolve();
+    assert.equal((await retry).address, '168.144.102.205');
+    assert.equal(await secondRetry, await retry);
+    assert.equal(resolver.pendingResolutions.size, 0);
+});
+
+test('ordinary website requests do not inherit another pending explicit retry policy', async () => {
+    const { resolver } = configuredResolver();
+    resolver.markResolverFailure(primary, new Error('earlier outage'), 10);
+    const gate = deferred();
+    let calls = 0;
+    resolver.queryResolver = async (candidate, domain, type) => {
+        calls += 1;
+        await gate.promise;
+        return answer(type === 'A' ? ['168.144.102.205'] : []);
+    };
+
+    const retry = resolver.resolveHNSDomain('handshake.mercenary', { ignoreCooldown: true });
+    const ordinary = resolver.resolveHNSDomain('handshake.mercenary');
+    assert.equal((await ordinary).error.code, 'RESOLVER_COOLDOWN');
+    assert.equal(calls, 4);
+    gate.resolve();
+    assert.equal((await retry).address, '168.144.102.205');
+});
+
 test('clear cache prevents an already pending lookup from repopulating it', async () => {
     const { resolver } = configuredResolver();
     const gate = deferred();
@@ -103,7 +145,7 @@ test('clear cache also prevents an already pending TLSA lookup from repopulating
     const records = [{ usage: 3, selector: 1, matchingType: 1, certificateAssociationData: 'ab'.repeat(32) }];
     resolver.queryResolver = async () => {
         await gate.promise;
-        return answer(records);
+        return { ...answer(records), authenticated: true };
     };
     const pending = resolver.resolveTLSARecords('example.hns');
     resolver.clearCache();

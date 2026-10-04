@@ -186,6 +186,7 @@ body {
 
 .address-bar-container {
     flex: 1;
+    min-width: 0;
     display: flex;
     align-items: center;
     background-color: #f1f3f4;
@@ -290,6 +291,7 @@ body {
 
 .address-bar {
     flex: 1;
+    min-width: 0;
     border: none;
     background: transparent;
     outline: none;
@@ -308,6 +310,25 @@ body {
     opacity: 0;
     transition: opacity 0.2s ease;
 }
+
+.hns-resolver-badge {
+    flex: 0 1 auto;
+    max-width: 158px;
+    min-width: 64px;
+    margin-right: 6px;
+    padding: 4px 8px;
+    border: 1px solid #cbd5e1;
+    border-radius: 5px;
+    color: #475569;
+    background: #f8fafc;
+    font: 500 11px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: pointer;
+}
+.hns-resolver-badge:hover { background: #eef2f7; }
+.hns-resolver-badge:focus-visible { outline: 2px solid #116466; outline-offset: 2px; }
 
 .loading-indicator.visible {
     opacity: 1;
