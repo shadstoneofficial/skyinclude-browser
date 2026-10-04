@@ -63,3 +63,23 @@ SNI and DANE/TLSA verification remain on the existing paths.
 
 No installed application, normal browsing profile, certificate trust settings,
 live forum submission, release or binary is changed by the source tests.
+
+## Native review completed — v0.1.27 candidate preparation
+
+Independent source acceptance at `f9d1da0e2c28f49e4dc5ab2142aaef03a0ac13b0`
+passed on 2026-10-04: native DANE-secured form Reload retained method/body,
+Host, SNI and actual TLSA service port. Cancel sent nothing; confirmation sent
+exactly one further POST. An activated beforeunload page blocked Reload with
+no recovery dialog and no second request. All 259 tests passed.
+
+Back/Forward did not silently repost, but the fixture went Home on Back and
+showed ERR_CACHE_MISS on Forward to the POST history entry. The unchanged
+v0.1.26 baseline behaved identically. The source-mode startup timeout also
+reproduced on the unchanged baseline; neither timeout is relabeled as a pass.
+These are retained limitations, not newly accepted history or startup behavior.
+
+The review verdict is merge-ready for the tested Reload fix. Candidate
+preparation changes only version metadata to 0.1.27 and this acceptance note;
+runtime code remains identical to the accepted source. Newly signed packages
+must repeat artifact provenance, signing/notarization and packaged acceptance
+checks. This is not public-release or installation approval.
