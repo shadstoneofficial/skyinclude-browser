@@ -5,6 +5,8 @@ class SkyIncludeRenderer {
         this.tabs = new Map();
         this.activeTabId = null;
         this.currentUrl = '';
+        this.addressBarTabId = null;
+        this.addressBarDisplayValue = '';
         this.navigationRequestId = 0;
         this.isLoading = false;
         this.securityPopoverOpen = false;
@@ -70,6 +72,19 @@ class SkyIncludeRenderer {
         
         this.addressBar.addEventListener('focus', () => {
             this.addressBar.select();
+        });
+
+        this.addressBar.addEventListener('blur', () => {
+            this.updateAddressBar(this.currentUrl, { force: true });
+        });
+
+        this.addressBar.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && this.hasAddressDraft()) {
+                e.preventDefault();
+                e.stopPropagation();
+                this.updateAddressBar(this.currentUrl, { force: true });
+                this.addressBar.select();
+            }
         });
 
         this.addressBar.addEventListener('contextmenu', async (e) => {
@@ -275,6 +290,10 @@ class SkyIncludeRenderer {
     async navigateToUrl(url) {
         if (!url.trim()) return;
         const requestId = ++this.navigationRequestId;
+        // Enter (or another explicit navigation) ends this draft. Set the
+        // baseline before IPC so redirects update normally, but a new edit
+        // made while navigation is pending is still protected.
+        this.addressBarDisplayValue = this.addressBar.value;
         
         try {
             this.showLoading(true);
@@ -370,9 +389,22 @@ class SkyIncludeRenderer {
         }
     }
 
-    updateAddressBar(url) {
+    hasAddressDraft() {
+        return document.activeElement === this.addressBar &&
+            this.addressBar.value !== this.addressBarDisplayValue;
+    }
+
+    updateAddressBar(url, { force = false } = {}) {
+        const changingTab = this.addressBarTabId !== null && this.addressBarTabId !== this.activeTabId;
+        const preserveDraft = !force && !changingTab && this.hasAddressDraft();
+        // Page state must advance even while the user edits the field. Keep a
+        // separate display baseline: late Home/loading/metadata updates are
+        // not permission to replace the focused, unsubmitted address.
         this.currentUrl = url;
-        this.addressBar.value = url === 'skyinclude://home' ? '' : url;
+        this.addressBarTabId = this.activeTabId;
+        if (preserveDraft) return;
+        this.addressBarDisplayValue = url === 'skyinclude://home' ? '' : url;
+        this.addressBar.value = this.addressBarDisplayValue;
     }
 
     updateNavigationButtons(canGoBack, canGoForward) {
@@ -771,9 +803,12 @@ class SkyIncludeRenderer {
     }
 
     focusAddressBar() {
+        const tabId = this.activeTabId;
+        const requestId = this.navigationRequestId;
         setTimeout(() => {
+            if (this.activeTabId !== tabId || this.navigationRequestId !== requestId ||
+                document.activeElement === this.addressBar) return;
             this.addressBar.focus();
-            this.addressBar.select();
         }, 0);
     }
 
