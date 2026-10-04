@@ -41,7 +41,10 @@ function makeWebContents(overrides = {}) {
         contents.loading = false;
     };
     contents.stop = () => { contents.calls.stop += 1; contents.loading = false; };
-    contents.reload = () => { contents.calls.reload += 1; };
+    contents.reload = () => {
+        contents.calls.reload += 1;
+        contents.emit('did-start-navigation', {}, contents.currentUrl, false, true);
+    };
     contents.goBack = () => { contents.calls.goBack += 1; };
     contents.goForward = () => { contents.calls.goForward += 1; };
     contents.destroy = () => { contents.calls.destroy += 1; contents.destroyed = true; };
