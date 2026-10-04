@@ -18,6 +18,7 @@ DNSSEC-validating resolver or change the live handshake.mercenary trust chain.
 | Reload outcome | Browser behavior |
 | --- | --- |
 | Native navigation starts | Normal Electron reload; no recovery prompt |
+| Page blocks unload to protect unsaved work | Respect cancellation; suppress the recovery prompt |
 | No main-frame navigation starts within 1.5 seconds | Offer a Cancel-first warning that reloading may repeat a login, post, or purchase |
 | Cancel or close the warning | No recovery request |
 | Explicitly choose Reload and resend | Chromium `Page.reload`, guarded by the original document loader ID |
@@ -41,7 +42,7 @@ SNI and DANE/TLSA verification remain on the existing paths.
 - Regression tests cover confirmation, cancellation, duplicate attempts,
   navigation/Stop/closure/tab-switch races, loader guard rejection, debugger
   ownership and watchdog cleanup.
-- Full source suite: 258 tests passed (2026-10-04).
+- Full source suite including the unload-prompt correction: 259 tests passed (2026-10-04).
 - Electron 42.11.3 arm64 disposable source test: actual toolbar DOM click,
   one cancellation followed by two confirmed reloads; exactly three total POSTs
   with identical encoded form bodies. Dialog responses were supplied by the

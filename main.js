@@ -1058,6 +1058,7 @@ class SkyIncludeBrowser {
             clearTimeout(timer);
             contents.removeListener('did-start-navigation', onNavigation);
             contents.removeListener('destroyed', cleanup);
+            contents.removeListener('will-prevent-unload', cleanup);
             signal.removeEventListener('abort', cleanup);
         };
         const onNavigation = (_event, _url, _inPlace, isMainFrame) => {
@@ -1069,6 +1070,9 @@ class SkyIncludeBrowser {
         }, 1500);
         contents.on('did-start-navigation', onNavigation);
         contents.once('destroyed', cleanup);
+        // A page protecting unsaved work is not Electron's silent repost bug.
+        // Respect the cancellation without offering a misleading resend sheet.
+        contents.once('will-prevent-unload', cleanup);
         signal.addEventListener('abort', cleanup, { once: true });
         try { contents.reload(); } catch (error) { cleanup(); throw error; }
     }

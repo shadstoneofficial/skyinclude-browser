@@ -33,6 +33,21 @@ test('Stop and destruction cancel the recovery watchdog', t => {
     assert.equal(recoveries, 0);
 });
 
+test('beforeunload cancellation suppresses recovery without overriding the page', t => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const f = makeBrowser();
+    let recoveries = 0;
+    f.browser.confirmReloadRecovery = () => { recoveries++; };
+    f.webContents.reload = () => f.webContents.emit('will-prevent-unload', {
+        preventDefault() { assert.fail('must not override beforeunload'); }
+    });
+    f.browser.reloadTab(f.tab.id);
+    t.mock.timers.tick(1500);
+    assert.equal(recoveries, 0);
+    assert.equal(f.webContents.listenerCount('did-start-navigation'), 0);
+    assert.equal(f.webContents.listenerCount('will-prevent-unload'), 0);
+});
+
 function fixture() {
     const f = makeBrowser();
     const commands = [];
