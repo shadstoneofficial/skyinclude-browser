@@ -27,6 +27,10 @@ These authoritative answers are distinct from temporary resolver failures. A tim
 
 After an endpoint failure, an in-memory circuit breaker skips it for 30 seconds. This prevents every navigation from paying the full timeout while a community resolver is offline. Changing resolver settings or clearing the resolver cache resets this local health state.
 
+An explicit Retry or Reload from the matching generated website-outage page
+bypasses that cooldown for a fresh attempt. Ordinary navigations cannot use this
+bypass, and an ordinary in-flight lookup cannot absorb the explicit retry.
+
 Website and TLSA lookups have separate circuit-breaker health. An endpoint that
 cannot answer TLSA service names must not disable otherwise working A/AAAA/CNAME
 resolution, and a website-query cooldown must not prevent an independent TLSA
@@ -53,8 +57,13 @@ TLSA answers from repopulating them.
 Native HNS HTTP navigations retain Chromium's normal HTTP caching behavior.
 Loading a native site does not clear the shared session cache or force no-cache
 headers. The explicit Clear Cache and Reload command still clears page and
-resolver caches. Ordinary Reload uses Chromium reload semantics, including POST
-resubmission behavior; reloading an internal outage page retries resolution.
+resolver caches. Ordinary Reload calls Electron's native reload API; reloading
+an internal outage page retries resolution. Electron 42.11.3 has an upstream
+POST-reload limitation: its repost-confirmation path can silently do nothing.
+SkyInclude does not bypass that confirmation or reconstruct/resend form data.
+Native same-host form submissions and 307/308 redirects are separately tested;
+they must not be confused with resubmitting an already completed POST via Reload.
+See the [upstream reload implementation](https://github.com/electron/electron/blob/v42.11.3/shell/browser/api/electron_api_web_contents.cc#L2586).
 
 The loopback proxy limits connection work and the post-upload wait for initial
 response headers to 15 seconds each, and HTTP stream inactivity to 60 seconds.

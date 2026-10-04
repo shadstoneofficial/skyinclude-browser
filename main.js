@@ -735,6 +735,14 @@ class SkyIncludeBrowser {
     async loadUrlInTab(tabId, inputUrl) {
         const tab = this.tabs.get(tabId);
         if (!tab) return;
+        const temporaryStatus = tab.hnsTemporaryStatus;
+        const retryWebsite = Boolean(temporaryStatus &&
+            tab.view.webContents.getURL() === temporaryStatus.documentUrl &&
+            tab.url === temporaryStatus.displayUrl &&
+            (inputUrl === temporaryStatus.url || inputUrl === temporaryStatus.displayUrl));
+        // Reload uses the visible native hostname; restore the exact original
+        // scheme/port/path before retrying the generated outage page.
+        if (retryWebsite) inputUrl = temporaryStatus.url;
         const retryHttps = tab.view.webContents.getURL().startsWith('data:') &&
             inputUrl === tab.hnsHttpsStatusUrl && inputUrl === tab.url && /^https:/i.test(inputUrl);
 
@@ -759,6 +767,7 @@ class SkyIncludeBrowser {
             tab.favicon = null;
             tab.securityInfo = null;
             delete tab.hnsHttpsStatusUrl;
+            delete tab.hnsTemporaryStatus;
             this.mainWindow.webContents.send('loading-changed', { tabId, loading: true, hostingProvider: null, hnsProfile: null, securityInfo: null, favicon: null });
 
             let finalUrl = inputUrl;
@@ -771,7 +780,9 @@ class SkyIncludeBrowser {
                 tab.securityInfo = this.buildSecurityInfo('local-home');
             } else {
                 // Check if it's an HNS domain or needs resolution
-                const resolved = await this.resolveUrl(inputUrl, { signal: controller.signal, forceTLSA: retryHttps });
+                const resolved = await this.resolveUrl(inputUrl, {
+                    signal: controller.signal, forceTLSA: retryHttps, ignoreCooldown: retryWebsite
+                });
                 if (!isCurrent()) return;
                 finalUrl = resolved.url || resolved;
                 loadOptions = resolved.options || {};
@@ -780,6 +791,7 @@ class SkyIncludeBrowser {
                 tab.hnsProfile = resolved.hnsProfile || null;
                 tab.securityInfo = resolved.securityInfo || null;
                 tab.hnsHttpsStatusUrl = resolved.hnsHttpsStatusUrl || null;
+                tab.hnsTemporaryStatus = resolved.hnsTemporaryStatus || null;
                 tab.pendingHttpsAvailabilityCheck = resolved.httpsAvailabilityCheck || null;
                 this.attachDeferredProfile(tab, resolved.profilePromise, navigationToken,
                     resolved.proxyHost || this.getHostnameForDisplayUrl(resolved.displayUrl || inputUrl));
@@ -1114,6 +1126,7 @@ class SkyIncludeBrowser {
             }
 
             delete tab.hnsHttpsStatusUrl;
+            delete tab.hnsTemporaryStatus;
 
             const previousHost = this.getHostnameForDisplayUrl(tab.url);
             tab.url = parsedUrl.toString().replace(/^http:\/\//, '');
@@ -1378,17 +1391,21 @@ class SkyIncludeBrowser {
     buildTemporaryHNSNavigation(originalUrl, resolution) {
         const parsedUrl = new URL(originalUrl);
         const domain = resolution.domain || parsedUrl.hostname;
+        const displayUrl = parsedUrl.protocol === 'https:' ? parsedUrl.toString()
+            : `${parsedUrl.host}${parsedUrl.pathname}${parsedUrl.search}${parsedUrl.hash}`;
+        const documentUrl = this.buildHNSStatusDataUrl({
+            title: 'Native website temporarily unavailable',
+            domain,
+            body: 'SkyInclude could not confirm this domain\'s native website because every configured HNS resolver temporarily failed. No identity or manifest fallback was opened automatically.',
+            originalUrl,
+            error: resolution.error?.message || null,
+            severity: 'warning',
+            actions: buildTemporaryResolutionActions(originalUrl, resolution)
+        });
         return {
-            url: this.buildHNSStatusDataUrl({
-                title: 'Native website temporarily unavailable',
-                domain,
-                body: 'SkyInclude could not confirm this domain\'s native website because every configured HNS resolver temporarily failed. No identity or manifest fallback was opened automatically.',
-                originalUrl,
-                error: resolution.error?.message || null,
-                severity: 'warning',
-                actions: buildTemporaryResolutionActions(originalUrl, resolution)
-            }),
-            displayUrl: `${domain}${parsedUrl.pathname}${parsedUrl.search}${parsedUrl.hash}`,
+            url: documentUrl,
+            displayUrl,
+            hnsTemporaryStatus: { url: originalUrl, displayUrl, documentUrl },
             bypassCache: true,
             hostingProvider: null,
             hnsProfile: null,

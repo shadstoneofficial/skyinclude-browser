@@ -249,6 +249,52 @@ test('an arbitrary data page cannot request forced TLSA refresh', async () => {
     assert.equal(force, false);
 });
 
+test('first explicit website-outage Retry or Reload recovers during resolver cooldown with the original URL intact', async () => {
+    for (const [action, url] of [['retry', 'http://handshake.mercenary:8080/thread?q=1#reply'],
+        ['reload', 'https://handshake.mercenary:8443/thread?q=1#reply']]) {
+        const { browser, tab, webContents } = fakeAdmissionBrowser();
+        browser.hnsResolver = new HNSResolver({ getSetting: key => key === 'hnsResolvers'
+            ? [{ id: 'fixture', transport: 'doh-wire', url: 'https://resolver.invalid/dns-query' }] : null });
+        browser.ensureHnsHttpsAdmission = async () => ({ state: 'verified' });
+        let down = true;
+        let addressQueries = 0;
+        browser.hnsResolver.queryResolver = async (_resolver, _domain, type) => {
+            if (type === 'A') addressQueries += 1;
+            if (down) throw Object.assign(new Error('resolver timeout'), { code: 'ETIMEDOUT' });
+            return { records: type === 'A' ? ['127.0.0.1'] : [], rcode: 0, rcodeName: 'NOERROR' };
+        };
+        await browser.loadUrlInTab(tab.id, url);
+        assert.equal(tab.hnsTemporaryStatus.url, url);
+        assert.equal(tab.hnsTemporaryStatus.documentUrl, webContents.getURL());
+        assert.match(decodeURIComponent(webContents.getURL()), /Native website temporarily unavailable/);
+        assert.equal(addressQueries, 1);
+        down = false;
+        assert.equal((await browser.hnsResolver.resolveHNSDomain('handshake.mercenary')).resolutionState, 'temporary-failure');
+        assert.equal(addressQueries, 1, 'ordinary navigation still honors cooldown');
+        if (action === 'reload') await browser.reloadTab(tab.id);
+        else await browser.loadUrlInTab(tab.id, tab.hnsTemporaryStatus.url);
+        assert.equal(addressQueries, 2, 'the first explicit retry must query the recovered resolver immediately');
+        assert.equal(webContents.getURL(), url, 'scheme, port, path, query and fragment survive Retry/Reload');
+        assert.equal(tab.hnsTemporaryStatus, null);
+    }
+});
+
+test('other links and unrelated data documents cannot bypass website resolver cooldown', async () => {
+    for (const mode of ['other-link', 'other-document']) {
+        const { browser, tab, webContents } = fakeAdmissionBrowser();
+        const status = browser.buildTemporaryHNSNavigation('http://handshake.mercenary:8080/page', {
+            domain: 'handshake.mercenary', resolutionState: 'temporary-failure'
+        });
+        tab.url = status.displayUrl;
+        tab.hnsTemporaryStatus = status.hnsTemporaryStatus;
+        webContents.currentUrl = mode === 'other-document' ? 'data:text/html,untrusted' : status.url;
+        let bypass;
+        browser.resolveUrl = async (_url, options) => { bypass = options.ignoreCooldown; return { url: 'https://example.com/' }; };
+        await browser.loadUrlInTab(tab.id, mode === 'other-link' ? 'http://other.agent/' : tab.url);
+        assert.equal(bypass, false);
+    }
+});
+
 test('same-native-site form navigations stay in Chromium while first/cross-host/status/gateway navigation retains resolution', async () => {
     const { browser, electron } = fakeAdmissionBrowser();
     const loads = [];

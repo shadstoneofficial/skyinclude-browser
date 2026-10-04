@@ -263,13 +263,19 @@ class HNSResolver {
             return cached.result;
         }
 
-        const pendingKey = `${configurationKey}|${cacheKey}`;
+        // A trusted explicit Retry must not join an ordinary producer whose
+        // resolver candidates have already been excluded by cooldown.
+        const ignoreCooldown = options.ignoreCooldown === true;
+        const pendingKey = `${configurationKey}|${cacheKey}|${ignoreCooldown ? 'retry' : 'normal'}`;
         let pending = this.pendingResolutions.get(pendingKey);
         if (!pending) {
             const controller = new AbortController();
             pending = { controller, consumers: 0, settled: false };
             const generation = this.cacheGeneration;
-            pending.promise = this.resolveUncachedDomain(cleanDomain, { signal: controller.signal })
+            pending.promise = this.resolveUncachedDomain(cleanDomain, {
+                signal: controller.signal,
+                ignoreCooldown
+            })
                 .then(result => {
                     if (result && result.resolutionState !== 'temporary-failure'
                         && !controller.signal.aborted && generation === this.cacheGeneration) {

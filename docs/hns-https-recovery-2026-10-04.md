@@ -52,16 +52,20 @@ The existing website-before-identity rules remain in effect.
 
 Source handoff checks on 2026-10-04:
 
-- `npm test`: 185 passed, zero failed/skipped (including syntax/toolchain checks).
+- `npm test`: 191 passed, zero failed/skipped (including syntax/toolchain checks).
 - `npm audit --audit-level=high`: zero vulnerabilities.
 - `git diff --check`: clean.
 - Repository hygiene: 60 tracked/untracked non-ignored source files scanned;
   no credential/private-key patterns, generated binaries/logs, oversized files,
   or runtime machine-local paths found.
 - Independent source re-review: no remaining actionable findings.
-- Real Electron 42.11.3 cold HTTP 301-to-HTTPS fixture passed. Initial POST and
-  stale-homepage-abort failures were reproduced and fixed; their final Electron
-  rerun and signed-package acceptance remain required before publication.
+- Real Electron 42.11.3 passed 16 fixture cases at `242efc1`, including direct
+  HTTPS, cold redirects, POST redirects, certificate rejection, and cross-port
+  pinning. The initial form-conversion and stale-homepage-abort failures were
+  fixed and retested successfully.
+- Follow-up: trusted website-outage Retry/Reload now bypasses local cooldown;
+  first-attempt recovery is covered by the real resolver in unit integration.
+  Exact-commit Electron rerun and signed-package acceptance remain required.
 
 Automated source coverage includes DNSSEC request flags and response validation,
 TLSA failover/cooldowns, non-default ports, cancellation/deadlines, native CONNECT
@@ -82,3 +86,15 @@ Host, SNI, and path/query preservation. Previous v0.1.25 acceptance evidence is
 retained, including its unsuccessful POST-reload check; it is not a full pass.
 The build agent must use the reviewed merged source and a new immutable patch
 version. Do not publish the older draft as if it contains this fix.
+
+### Separate known limitation: POST reload
+
+Real Electron acceptance reproduced toolbar Reload doing nothing after an
+already completed POST, including on ordinary localhost (not just HNS).
+Electron 42.11.3's [native reload implementation](https://github.com/electron/electron/blob/v42.11.3/shell/browser/api/electron_api_web_contents.cc#L2586)
+documents this unimplemented repost-confirmation path. It is distinct from
+the same-host form and 307/308 fixes. Do not report POST reload as passed or
+silently work around it with automatic resubmission, captured request bodies,
+or a global disable-confirmation flag. A safe follow-up requires explicit user
+confirmation and separate acceptance coverage. Publication remains gated on an
+explicit decision about this known limitation.

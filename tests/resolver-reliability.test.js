@@ -375,3 +375,30 @@ test('resolver recovery after a transient failure returns and caches the native 
     assert.equal(recovered.address, '134.209.111.52');
     assert.equal(resolver.cache.get('lisa.agent').result.address, '134.209.111.52');
 });
+
+for (const domain of ['lisa.agent', 'handshake.mercenary']) {
+    test(`explicit website retry recovers ${domain} during resolver cooldown`, async () => {
+        const resolver = new HNSResolver(settings([primary]));
+        let offline = true;
+        let requests = 0;
+        resolver.queryResolver = async (candidate, name, type) => {
+            requests += 1;
+            if (offline) throw new Error('temporary timeout');
+            return response(type === 'A' ? ['168.144.102.205'] : []);
+        };
+        resolver.fetchJson = async () => assert.fail('resolver outage must never fetch a manifest');
+
+        const failure = await resolver.resolveHNSDomain(domain);
+        assert.equal(failure.resolutionState, 'temporary-failure');
+        assert.equal(requests, 4);
+        offline = false;
+        const cooling = await resolver.resolveHNSDomain(domain);
+        assert.equal(cooling.error.code, 'RESOLVER_COOLDOWN');
+        assert.equal(requests, 4, 'ordinary navigation still respects cooldown');
+        const retry = await resolver.resolveHNSDomain(domain, { ignoreCooldown: true });
+        assert.equal(retry.address, '168.144.102.205');
+        assert.equal(requests, 8);
+        assert.equal((await resolver.resolveHNSDomain(domain)).address, '168.144.102.205');
+        assert.equal(requests, 8, 'successful retry supplies the normal website cache');
+    });
+}
