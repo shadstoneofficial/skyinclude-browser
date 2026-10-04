@@ -59,13 +59,18 @@ Source handoff checks on 2026-10-04:
   no credential/private-key patterns, generated binaries/logs, oversized files,
   or runtime machine-local paths found.
 - Independent source re-review: no remaining actionable findings.
-- Real Electron 42.11.3 passed 16 fixture cases at `242efc1`, including direct
-  HTTPS, cold redirects, POST redirects, certificate rejection, and cross-port
-  pinning. The initial form-conversion and stale-homepage-abort failures were
-  fixed and retested successfully.
-- Follow-up: trusted website-outage Retry/Reload now bypasses local cooldown;
-  first-attempt recovery is covered by the real resolver in unit integration.
-  Exact-commit Electron rerun and signed-package acceptance remain required.
+- Real Electron 42.11.3 passed all 17 critical fixture cases at `0223337`,
+  including direct HTTPS, cold redirects, real POST 301/302/303/307/308,
+  certificate rejection, cross-port pinning, and rapid initial navigation.
+  The form-conversion and stale-homepage-abort failures were fixed and retested.
+- Trusted website-outage Retry/Reload bypasses local cooldown. The real browser
+  recovered on its first Retry, clicked 115 ms after a synthetic resolver
+  failure. Cold-redirect TLSA recovery retained the native query and fragment.
+- Both GitHub CI checks passed at `0223337` (dependency audit/tests and Windows
+  toolchain patch). The build agent independently reran all 191 source tests.
+- These are source-runtime fixture results, not signed-package acceptance.
+  Live-site acceptance is still blocked as detailed below. No merge or release
+  is approved by these results.
 
 Automated source coverage includes DNSSEC request flags and response validation,
 TLSA failover/cooldowns, non-default ports, cancellation/deadlines, native CONNECT
@@ -86,6 +91,42 @@ Host, SNI, and path/query preservation. Previous v0.1.25 acceptance evidence is
 retained, including its unsuccessful POST-reload check; it is not a full pass.
 The build agent must use the reviewed merged source and a new immutable patch
 version. Do not publish the older draft as if it contains this fix.
+
+### Live acceptance blocker: validating resolver availability
+
+One cold, read-only browser navigation at 03:20 UTC on 2026-10-04 used the
+unchanged default resolver order and a fresh temporary profile. Address lookup
+recovered through Web3DNS, then native HTTP redirected to HTTPS. All configured
+TLSA providers failed:
+
+| Provider | Observed TLSA result |
+| --- | --- |
+| HNS DoH | HTTP 403: DoH dropped query |
+| Web3DNS JSON | HTTP 400: service name rejected as invalid FQDN |
+| Shakestation DoH | Request deadline exceeded |
+
+The browser retained `https://handshake.mercenary/` and displayed
+`Native HTTPS temporarily unavailable`, with certificate validation explicitly
+not verified. It did not render the updated HTTPS site, claim DANE success,
+silently downgrade, or navigate to a manifest. This verifies safe failure, not
+successful live loading.
+
+Two further read-only DNS-only checks at 03:27 UTC tested the existing
+operator's [documented regional endpoints](https://welcome.hnsdoh.com/).
+Australia returned the same HTTP 403; Asia refused the connection. These
+point-in-time results are not a global uptime claim. No provider defaults,
+user settings, production DNS, or certificate trust were changed.
+
+Next gate: qualify a reliable authenticated DNSSEC-validating TLSA resolver,
+review any provider/configuration change, and rerun cold live navigation with
+native hostname, Host, SNI and DANE preserved. Do not remove authentication
+requirements or bypass certificate checks to turn this into a passing result.
+The PR remains draft until this live-loading gap has an accepted resolution.
+
+The build agent retained the 17-case summary, individual reports, live-failure
+report, screenshots, and runtime SHA-256 inventory separately from the public
+repository. Temporary profiles, session data and synthetic private keys are
+not part of that evidence archive or this PR.
 
 ### Separate known limitation: POST reload
 
