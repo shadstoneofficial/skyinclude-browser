@@ -23,6 +23,7 @@ class SkyIncludeRenderer {
         this.addressBar = document.getElementById('address-bar');
         this.loadingIndicator = document.getElementById('loading-indicator');
         this.securityIndicator = document.getElementById('security-indicator');
+        this.resolverBadge = document.getElementById('hns-resolver-badge');
         this.hostingIndicator = document.getElementById('hosting-indicator');
         this.hnsProfileBtn = document.getElementById('hns-profile-btn');
         this.hnsProfilePopover = document.getElementById('hns-profile-popover');
@@ -90,6 +91,10 @@ class SkyIncludeRenderer {
         this.securityIndicator.addEventListener('click', (e) => {
             e.stopPropagation();
             this.toggleSecurityPopover();
+        });
+        this.resolverBadge.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this.showSecurityPopover(this.resolverBadge);
         });
 
         this.hnsProfileBtn.addEventListener('click', (e) => {
@@ -237,6 +242,7 @@ class SkyIncludeRenderer {
                     this.activeTabId = activeTab.id;
                     this.updateAddressBar(activeTab.url);
                     this.updateSecurityIndicator(activeTab.url, activeTab.hostingProvider, activeTab.securityInfo);
+                    this.updateResolverBadge(activeTab.resolverInfo);
                     this.updateHostingIndicator(activeTab.hostingProvider);
                     this.updateHnsProfileIndicator(activeTab.hnsProfile);
                     if (activeTab.url === 'skyinclude://home') {
@@ -356,6 +362,7 @@ class SkyIncludeRenderer {
         this.updateNavigationButtons(data.canGoBack, data.canGoForward);
         this.showLoading(data.loading);
         this.updateSecurityIndicator(data.url, data.hostingProvider, data.securityInfo);
+        this.updateResolverBadge(data.resolverInfo);
         this.updateHostingIndicator(data.hostingProvider);
         this.updateHnsProfileIndicator(data.hnsProfile);
         if (data.url === 'skyinclude://home') {
@@ -389,6 +396,7 @@ class SkyIncludeRenderer {
             if (Object.prototype.hasOwnProperty.call(data, 'hnsProfile')) {
                 this.updateHnsProfileIndicator(data.hnsProfile);
             }
+            if (Object.prototype.hasOwnProperty.call(data, 'resolverInfo')) this.updateResolverBadge(data.resolverInfo);
         }
         
         // Update tab loading state
@@ -404,6 +412,7 @@ class SkyIncludeRenderer {
             if (Object.prototype.hasOwnProperty.call(data, 'securityInfo')) {
                 tab.securityInfo = data.securityInfo;
             }
+            if (Object.prototype.hasOwnProperty.call(data, 'resolverInfo')) tab.resolverInfo = data.resolverInfo;
             if (Object.prototype.hasOwnProperty.call(data, 'favicon')) {
                 tab.favicon = data.favicon;
             }
@@ -507,9 +516,9 @@ class SkyIncludeRenderer {
         this.hideSecurityPopover();
     }
 
-    async showSecurityPopover() {
+    async showSecurityPopover(anchor = this.securityIndicator) {
         const info = this.currentSecurityInfo || this.deriveSecurityInfo(this.currentUrl);
-        const rect = this.securityIndicator.getBoundingClientRect();
+        const rect = anchor.getBoundingClientRect();
 
         try {
             await window.electronAPI.showSecurityPopover({
@@ -652,9 +661,25 @@ class SkyIncludeRenderer {
             this.updateAddressBar(tab.url);
             this.updateNavigationButtons(tab.canGoBack, tab.canGoForward);
             this.updateSecurityIndicator(tab.url, tab.hostingProvider, tab.securityInfo);
+            this.updateResolverBadge(tab.resolverInfo);
             this.updateHostingIndicator(tab.hostingProvider);
             this.updateHnsProfileIndicator(tab.hnsProfile);
         }
+    }
+
+    updateResolverBadge(info) {
+        const lookup = info?.website;
+        if (!info?.domain) {
+            this.resolverBadge.classList.add('hidden');
+            this.resolverBadge.textContent = '';
+            return;
+        }
+        const label = lookup?.resolver?.name ? `DNS: ${lookup.resolver.name}`
+            : lookup?.notConfigured ? 'DNS: not configured' : lookup?.state === 'temporary-failure' ? 'DNS unavailable' : 'DNS details';
+        this.resolverBadge.textContent = label;
+        this.resolverBadge.title = `${label} — website DNS and HTTPS identity lookup details`;
+        this.resolverBadge.setAttribute('aria-label', this.resolverBadge.title);
+        this.resolverBadge.classList.remove('hidden');
     }
 
     updateHnsProfileIndicator(profile) {

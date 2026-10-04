@@ -30,10 +30,11 @@ Read-only checks found:
 
 ## Fix boundaries
 
-The change adds shared, endpoint-scoped DANE admission at the native proxy's
+The initial change adds shared, endpoint-scoped DANE admission at the native proxy's
 CONNECT boundary and authenticated TLSA failover. It does not rewrite redirects,
 intercept TLS application bytes, disable certificate checks, alter the website,
-change production DNS, replace default resolver operators, or install an app.
+change production DNS, or install an app. The later provider/visibility follow-up
+below updates the built-in resolver endpoints with the owner's approval.
 The existing website-before-identity rules remain in effect.
 
 | Situation | Website outcome | Profile/actions/manifest outcome |
@@ -122,6 +123,45 @@ review any provider/configuration change, and rerun cold live navigation with
 native hostname, Host, SNI and DANE preserved. Do not remove authentication
 requirements or bypass certificate checks to turn this into a passing result.
 The PR remains draft until this live-loading gap has an accepted resolution.
+
+### Provider and visibility follow-up
+
+The project owner subsequently confirmed Shakestation will not return and
+approved completing the existing Web3DNS integration before considering new
+infrastructure. The active defaults are now HNS DoH followed by binary DoH at
+`https://doh.web3dns.net/`. Shakestation is archived and excluded from all runtime
+candidates. Migration preserves customized order, JSON endpoints, disabled
+entries and explicit empty configurations; it does not silently select a new
+operator for a custom-only configuration whose last provider retired.
+
+The browser's DNS badge and connection details identify the actual website
+resolver separately from the HTTPS identity/TLSA resolver, including cache use,
+fallback attempts and validation state. Provider metadata is request-scoped;
+credentials, URL query parameters and fragments are not displayed. These details
+do not change the meaning of the existing DANE security indicator.
+
+Live root-path Web3DNS queries returned the correct A and TLSA data at 03:59 UTC,
+but both had AD=false. Binary endpoint compatibility is therefore established;
+authenticated HTTPS failover is not yet qualified. See
+[provider evidence and the unsent operator inquiry](resolver-provider-status.md).
+Do not present the historical 191-test/17-fixture results above as acceptance of
+this later follow-up without rerunning the tests on its exact source revision.
+
+Follow-up source handoff checks on 2026-10-04:
+
+- `npm test`: 236 passed, zero failed/skipped, including 15 resolver UI cases
+  and binary Web3DNS root-path adapter tests.
+- `npm audit --audit-level=high`: zero vulnerabilities.
+- `git diff --check`: clean. Hygiene scan of 64 non-ignored repository files:
+  no credential/private-key patterns, generated binary/log artifacts, oversized
+  files or runtime machine-local paths found.
+- Independent review found and resolved an optional TXT error-token leak and
+  cross-tab CONNECT metadata overwrite. No remaining actionable findings.
+- Request/cache/forced-refresh provenance, migration/custom/disabled settings,
+  empty configurations, native Host/SNI, DANE rejection and website-before-
+  manifest regressions remain green.
+- Exact-revision Electron runtime/visual acceptance is pending. Source tests do
+  not qualify the live Web3DNS DNSSEC contract, signed package or release.
 
 The build agent retained the 17-case summary, individual reports, live-failure
 report, screenshots, and runtime SHA-256 inventory separately from the public

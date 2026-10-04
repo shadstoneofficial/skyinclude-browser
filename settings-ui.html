@@ -245,16 +245,21 @@
                     </select>
                     <p class="setting-description">A bundled P2P light client is not available yet. Resolver operators can observe requested names.</p>
                 </div>
+                <div id="resolver-retirement-notice" class="setting-group" role="status" hidden>
+                    <strong id="resolver-retirement-title"></strong>
+                    <p id="resolver-retirement-message" class="setting-description"></p>
+                </div>
+                <p class="setting-description">The built-in providers are HNS DoH and Web3DNS. Shakestation has retired and is no longer queried. The address-bar DNS badge shows the provider actually used, including cached results and fallback attempts.</p>
 
                 <div class="setting-group">
                     <label class="setting-label">Custom Resolver Endpoint</label>
                     <p class="setting-description">Optional first resolver. Use an HTTPS endpoint, optionally prefixed with <code>doh-wire</code> or <code>dns-json</code>. Resolver operators can observe requested names.</p>
-                    <input type="text" id="hnsCustomResolver" class="form-control" placeholder="e.g., dns-json https://api.web3dns.net/">
+                    <input type="text" id="hnsCustomResolver" class="form-control" placeholder="e.g., doh-wire https://doh.web3dns.net/">
                 </div>
 
                 <div class="setting-group">
                     <label class="setting-label">Ordered Resolver Endpoints</label>
-                    <p class="setting-description">One per line in priority order: <code>doh-wire URL</code> or <code>dns-json URL</code>. A legacy URL alone is treated as binary DoH. Native DNS IPs are not accepted.</p>
+                    <p class="setting-description">One per line in priority order: <code>doh-wire URL</code> or <code>dns-json URL</code>. Prefix an inactive entry with <code>disabled</code> to retain it without querying it. An empty list does not silently select another provider. Native DNS IPs are not accepted.</p>
                     <textarea id="hnsResolvers" class="form-control resolver-list" rows="4"></textarea>
                 </div>
 
@@ -362,6 +367,11 @@
         }
 
         function populateSettings(settings) {
+            const notice = settings.hnsResolverRetirementNotice;
+            document.getElementById('resolver-retirement-notice').hidden = !notice;
+            document.getElementById('resolver-retirement-title').textContent = notice?.title || '';
+            document.getElementById('resolver-retirement-message').textContent = notice
+                ? `${notice.message || ''}${notice.requiresResolverSelection ? ' Choose and save an active resolver below to restore HNS lookup.' : ''}` : '';
             document.getElementById('hnsResolutionMode').value = 'doh';
             document.getElementById('hnsCustomResolver').value = settings.hnsCustomResolver || '';
             document.getElementById('hnsResolvers').value = (settings.hnsResolvers || [])
@@ -383,19 +393,21 @@
             if (!resolver || typeof resolver !== 'object' || !resolver.url) {
                 return '';
             }
-            return `${resolver.transport || 'doh-wire'} ${resolver.url}`;
+            return `${resolver.enabled === false ? 'disabled ' : ''}${resolver.transport || 'doh-wire'} ${resolver.url}`;
         }
 
         function parseResolverSetting(value) {
-            const line = value.trim();
+            let line = value.trim();
+            const enabled = !/^disabled\s+/i.test(line);
+            if (!enabled) line = line.replace(/^disabled\s+/i, '');
             const match = line.match(/^(doh-wire|dns-json)\s+(.+)$/i);
             if (!match) {
-                return line;
+                return enabled ? line : { url: line, enabled: false };
             }
             return {
                 transport: match[1].toLowerCase(),
                 url: match[2].trim(),
-                enabled: true
+                enabled
             };
         }
 
@@ -426,6 +438,7 @@
                 showMessage('Saved. Settings updated successfully.', 'success');
                 saveButton.textContent = 'Saved';
                 currentSettings = { ...currentSettings, ...newSettings };
+                await loadSettings();
             } catch (error) {
                 saveButton.textContent = originalText;
                 showMessage('Failed to save settings: ' + error.message, 'error');

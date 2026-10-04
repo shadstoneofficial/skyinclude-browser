@@ -109,12 +109,31 @@ Existing URL-only settings remain compatible and migrate to transport descriptor
 The built-in order is:
 
 1. HNS DoH (`doh-wire https://hnsdoh.com/dns-query`)
-2. Web3DNS (`dns-json https://api.web3dns.net/`)
-3. Shakestation DoH (`doh-wire https://resolve.shakestation.io/dns-query`)
+2. Web3DNS DoH (`doh-wire https://doh.web3dns.net/`)
 
-New installs receive all three entries. Existing installs that still have either the untouched legacy single-HNSDoH default or the untouched HNSDoH/Web3DNS built-in pair are upgraded to this three-endpoint order. Explicitly customized resolver lists keep their exact order, and the optional custom resolver remains first.
+Shakestation was retired from active use on 2026-10-04 at the project owner's
+direction. Its old endpoint is retained only in the provider archive. New
+installs receive the two active entries. Settings migration upgrades untouched
+legacy built-in lists and removes the exact retired hostname, including a
+retired custom-first endpoint. Other customized endpoints/order remain intact;
+the browser does not treat an arbitrary provider's display name or ID as proof
+that it is Shakestation. Affected users receive a retirement notice. If removal
+leaves a customized configuration without any resolver, the browser asks the
+user to select one rather than silently introducing another provider.
 
-The Web3DNS API root is the JSON endpoint. `https://api.web3dns.net/dns-query` is not used. The community-provided native resolver IPs (`82.68.70.162` and `82.68.70.163`) are deliberately not accepted in this list: native DNS is a different, unencrypted transport and must not be normalized into a DoH URL.
+The Web3DNS binary DoH endpoint uses the hostname root `/`. SkyInclude preserves
+that path instead of appending `/dns-query`. Other providers retain conventional
+DoH URL shorthand. The older `https://api.web3dns.net/` JSON adapter remains
+supported for existing customized configurations; neither Web3DNS endpoint uses
+`/dns-query`. The JSON and binary interfaces are the same provider, not two
+independent fallback operators. Native resolver IPs are deliberately not
+accepted in this list: native DNS is a different, unencrypted transport and
+must not be normalized into a DoH URL.
+
+Endpoint compatibility does not imply DNSSEC validation. A Web3DNS binary TLSA
+response observed on 2026-10-04 contained the correct record but AD=false. The
+browser must reject it for DANE trust and explain the missing authentication.
+See [provider status and pending operator questions](resolver-provider-status.md).
 
 The resolver test in Settings uses the saved resolver order and reports the endpoint name, transport, DNS status, fallback count, latency, and record counts.
 
@@ -122,7 +141,19 @@ The resolver test in Settings uses the saved resolver order and reports the endp
 
 Every third-party resolver can observe the names sent to it. Resolver selection therefore affects privacy as well as availability. Diagnostics retain a small in-memory history containing endpoint identity, transport, latency, status, and fallback count. They do not add answer contents or additional queried-name logging.
 
-Built-in endpoint changes require an explicit release decision backed by current health checks. Web3DNS remains the second built-in resolver. Shakestation was approved as the third, wire-format DoH fallback after its service recovered; it remains last because point-in-time probes showed intermittent first-query latency. Neither endpoint replaces HNS DoH as the first choice.
+Built-in endpoint changes require an explicit release decision backed by current
+health checks. HNS DoH remains first and Web3DNS remains second; Shakestation is
+archived and is never queried. Integration tests do not replace live provider
+qualification or establish an uptime guarantee.
+
+The HNS resolver indicator identifies the provider that actually answered the
+website lookup, not the first provider in Settings. Its details distinguish the
+website/address lookup from the TLSA/HTTPS identity lookup, because these can use
+different providers or fail independently. Details include the transport,
+sanitized endpoint, fallback attempts and whether a result came from cache.
+DNSSEC authentication and certificate verification remain separate from merely
+receiving a DNS answer. No provider is invented for an unresolved lookup, and
+ordinary ICANN/local pages must not inherit another tab's HNS resolver label.
 
 The address bar continues to show the HNS hostname and path, for example:
 

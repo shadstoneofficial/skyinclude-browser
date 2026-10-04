@@ -7,6 +7,7 @@ const KNOWN_RESOLVERS = {
     'hnsdoh.com': { id: 'hnsdoh', name: 'HNS DoH', transport: 'doh-wire' },
     'query.hdns.io': { id: 'hdns', name: 'HDNS', transport: 'doh-wire' },
     'api.web3dns.net': { id: 'web3dns', name: 'Web3DNS', transport: 'dns-json' },
+    'doh.web3dns.net': { id: 'web3dns', name: 'Web3DNS', transport: 'doh-wire' },
     'resolve.shakestation.io': { id: 'shakestation', name: 'Shakestation DoH', transport: 'doh-wire' }
 };
 
@@ -21,18 +22,34 @@ const BUILT_IN_RESOLVERS = [
     {
         id: 'web3dns',
         name: 'Web3DNS',
-        transport: 'dns-json',
-        url: 'https://api.web3dns.net/',
+        transport: 'doh-wire',
+        url: 'https://doh.web3dns.net/',
         enabled: true
-    },
+    }
+];
+
+// Historical metadata is not a runtime fallback list.
+const ARCHIVED_RESOLVERS = [
     {
         id: 'shakestation',
         name: 'Shakestation DoH',
         transport: 'doh-wire',
         url: 'https://resolve.shakestation.io/dns-query',
-        enabled: true
+        enabled: false,
+        status: 'retired',
+        retirementReason: 'Shakestation has permanently retired its public HNS resolver.'
     }
 ];
+
+function isRetiredResolver(input) {
+    const raw = typeof input === 'string' ? parseResolverString(input) : input;
+    if (!raw || typeof raw !== 'object') return false;
+    const value = String(raw.url || raw.endpoint || '').trim();
+    try {
+        const url = new URL(/^https?:\/\//i.test(value) ? value : `https://${value}`);
+        return url.hostname.toLowerCase().replace(/\.$/, '') === 'resolve.shakestation.io';
+    } catch { return false; }
+}
 
 function slugify(value, fallback = 'custom-resolver') {
     const slug = String(value || '')
@@ -75,7 +92,8 @@ function normalizeResolverUrl(value, transport) {
     }
 
     url.hash = '';
-    if (transport === 'doh-wire' && (!url.pathname || url.pathname === '/')) {
+    if (transport === 'doh-wire' && (!url.pathname || url.pathname === '/') &&
+        hostname.toLowerCase().replace(/\.$/, '') !== 'doh.web3dns.net') {
         url.pathname = '/dns-query';
     }
 
@@ -91,7 +109,7 @@ function normalizeResolverDescriptor(input, index = 0) {
         ? parseResolverString(input)
         : (typeof input === 'object' && !Array.isArray(input) ? { ...input } : null);
 
-    if (!raw || raw.enabled === false) {
+    if (!raw || raw.enabled === false || isRetiredResolver(raw)) {
         return null;
     }
 
@@ -158,9 +176,11 @@ function formatResolverSetting(resolver) {
 }
 
 module.exports = {
+    ARCHIVED_RESOLVERS,
     BUILT_IN_RESOLVERS,
     RESOLVER_TRANSPORTS,
     formatResolverSetting,
+    isRetiredResolver,
     normalizeResolverDescriptor,
     normalizeResolverList,
     normalizeResolverUrl,

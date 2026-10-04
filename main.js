@@ -215,8 +215,11 @@ class SkyIncludeBrowser {
                 tab.navigationToken = Symbol('native-navigation');
                 tab.navigationAbortController = new AbortController();
                 tab.resolving = false;
+                tab.resolverInfo = null;
+                this.sendTabUpdated(tab);
             }
             tab.mainFrameNavigationUrl = navigationUrl;
+            tab.mainFrameNavigationPending = true;
         });
         view.webContents.on('will-redirect', (_event, navigationUrl, _isInPlace, isMainFrame) => {
             const tab = this.tabs.get(tabId);
@@ -230,6 +233,8 @@ class SkyIncludeBrowser {
         });
 
         view.webContents.on('did-navigate', (event, navigationUrl) => {
+            const tab = this.tabs.get(tabId);
+            if (tab?.mainFrameNavigationUrl === navigationUrl) tab.mainFrameNavigationPending = false;
             this.updateTabUrlFromNavigation(tabId, navigationUrl).catch(error => {
                 this.log('navigation-url-update-error', { tabId, navigationUrl, message: error.message });
             });
@@ -270,6 +275,7 @@ class SkyIncludeBrowser {
             favicon: null,
             hostingProvider: null,
             hnsProfile: null,
+            resolverInfo: null,
             securityInfo: null
         });
 
@@ -305,6 +311,7 @@ class SkyIncludeBrowser {
             favicon: tab.favicon,
             hostingProvider: tab.hostingProvider,
             hnsProfile: tab.hnsProfile,
+            resolverInfo: tab.resolverInfo || null,
             securityInfo: tab.securityInfo
         });
     }
@@ -418,13 +425,17 @@ class SkyIncludeBrowser {
         }
 
         if (type === 'hns-unresolved') {
+            const temporary = state === 'temporary-failure';
             return {
                 level: 'danger',
-                title: 'HNS site not resolved',
-                summary: 'SkyInclude could not find a browsable HNS A/AAAA/CNAME record for this name.',
+                title: options.notConfigured ? 'No HNS resolver configured' : temporary ? 'HNS DNS temporarily unavailable' : 'HNS site not resolved',
+                summary: options.notConfigured ? 'Choose an active HNS resolver in Preferences to look up this website.'
+                    : temporary ? 'The resolvers could not confirm this website. This does not mean the domain has no website.'
+                    : 'SkyInclude has not resolved a native website address for this name.',
                 details: [
                     ['HNS name', domain || 'Unknown'],
-                    ['Resolution', 'No browsable address record found'],
+                    ['Resolution', options.notConfigured ? 'No query was sent; website existence is unknown'
+                        : temporary ? 'Temporary lookup failure; website existence is unknown' : 'No website address available'],
                     ['DANE/TLSA', 'Cannot verify without a reachable HTTPS server']
                 ]
             };
@@ -509,6 +520,72 @@ class SkyIncludeBrowser {
         return null;
     }
 
+    sanitizeResolverLookup(value = {}, fallbackState = 'unknown') {
+        const provider = candidate => {
+            if (!candidate || typeof candidate !== 'object') return null;
+            let endpoint = '';
+            try {
+                const url = new URL(candidate.url);
+                if (['http:', 'https:'].includes(url.protocol)) endpoint = `${url.origin}${url.pathname}`;
+            } catch { /* Never expose an unparsed endpoint or its query secrets. */ }
+            const name = String(candidate.name || candidate.id || 'Custom resolver').replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 80);
+            return { name, transport: ['doh-wire', 'dns-json'].includes(candidate.transport) ? candidate.transport : 'unknown', url: endpoint };
+        };
+        const attempts = (Array.isArray(value.resolverAttempts) ? value.resolverAttempts : Array.isArray(value.attempts) ? value.attempts : [])
+            .slice(0, 12).map(attempt => ({
+                resolver: provider(attempt.resolver),
+                status: /^[A-Z0-9_-]+$/.test(String(attempt.status || '')) ? String(attempt.status).slice(0, 60) : 'ERROR'
+            }));
+        const state = value.resolverResolutionState || value.resolutionState || fallbackState;
+        const unvalidated = attempts.some(attempt => attempt.status === 'DNSSEC_UNAUTHENTICATED');
+        const notConfigured = value.code === 'NO_HNS_RESOLVERS' || value.error?.code === 'NO_HNS_RESOLVERS';
+        return {
+            resolver: provider(value.resolver), attempts,
+            cacheHit: value.cacheHit === true,
+            admissionCacheHit: value.admissionCacheHit === true,
+            authenticated: typeof value.authenticated === 'boolean' ? value.authenticated : null,
+            notConfigured,
+            state: ['resolved', 'authoritative-absence', 'temporary-failure'].includes(state) ? state : fallbackState,
+            reason: notConfigured ? 'No active HNS resolver is configured. Choose a provider in Preferences.'
+                : unvalidated ? 'A resolver returned records without validated DNSSEC; they were not trusted.'
+                : state === 'temporary-failure' ? 'The lookup could not be completed. This is not proof that records are absent.'
+                    : state === 'authoritative-absence' ? 'The resolver confirmed that the requested records are absent.' : null
+        };
+    }
+
+    buildResolverDetails(resolverInfo) {
+        if (!resolverInfo?.domain) return [];
+        const rows = [];
+        for (const [key, label] of [['website', 'Website DNS'], ['tlsa', resolverInfo.tlsaPurpose === 'availability-check' ? 'HTTPS availability / TLSA' : 'HTTPS identity / TLSA']]) {
+            const lookup = resolverInfo[key];
+            if (!lookup) {
+                if (key === 'tlsa') rows.push([label, 'No TLSA lookup details recorded for this navigation']);
+                continue;
+            }
+            const resolver = lookup.resolver;
+            rows.push([label, resolver ? resolver.name : lookup.notConfigured ? 'Not configured' : lookup.state === 'temporary-failure' ? 'Unavailable' : 'Provider not recorded']);
+            if (resolver) {
+                const protocol = resolver.url.startsWith('http:') ? 'HTTP (unencrypted)' : 'HTTPS';
+                rows.push([`${label}: endpoint`, `${resolver.transport === 'dns-json' ? `DNS JSON over ${protocol}` : resolver.transport === 'doh-wire' ? `Binary DNS over ${protocol}` : 'Transport not recorded'} · ${resolver.url || 'Endpoint not recorded'}`]);
+            }
+            rows.push([`${label}: source`, lookup.admissionCacheHit ? 'Reused HTTPS check and its recorded DNS provider'
+                : lookup.cacheHit ? 'Cached DNS result' : lookup.notConfigured ? 'No query was sent'
+                    : lookup.attempts.length && lookup.attempts.every(attempt => attempt.status === 'COOLDOWN')
+                        ? 'No query sent; resolvers cooling down'
+                        : lookup.state === 'temporary-failure' ? 'Lookup unsuccessful'
+                            : resolver && ['resolved', 'authoritative-absence'].includes(lookup.state)
+                                ? 'Fresh lookup' : 'Lookup source not recorded']);
+            if (key === 'tlsa') rows.push(['DNSSEC validation', lookup.authenticated === true
+                ? 'Validated by the resolver (AD=true)' : lookup.authenticated === false
+                    ? 'Not validated; not sufficient to trust an HTTPS identity' : 'Validation result not recorded']);
+            if (lookup.reason) rows.push([`${label}: result`, lookup.reason]);
+            if (lookup.attempts.length) rows.push([`${label}: attempts`, lookup.attempts.map(attempt =>
+                `${attempt.resolver?.name || 'Resolver'}: ${attempt.status === 'DNSSEC_UNAUTHENTICATED' ? 'records returned, DNSSEC not validated' : attempt.status}${attempt.resolver?.url ? ` (${attempt.resolver.transport} · ${attempt.resolver.url})` : ''}`
+            ).join('\n')]);
+        }
+        return rows;
+    }
+
     normalizeCertificateFingerprint(value) {
         return String(value || '').replace(/:/g, '').toLowerCase();
     }
@@ -560,7 +637,7 @@ class SkyIncludeBrowser {
         return this.getCertificateFingerprints(certificate).find(value => /^[a-f0-9]{64}$/.test(value)) || '';
     }
 
-    rememberDaneVerifiedCertificate(domain, certificate, { port = 443, address = '' } = {}) {
+    rememberDaneVerifiedCertificate(domain, certificate, { port = 443, address = '', resolverMetadata = null } = {}) {
         const normalizedDomain = this.normalizeGatewayHost(String(domain || '').toLowerCase());
         const fingerprint = this.getStrongCertificateFingerprint(certificate);
         if (!normalizedDomain || !fingerprint || !this.isHNSDomain(normalizedDomain)) {
@@ -587,6 +664,7 @@ class SkyIncludeBrowser {
             port,
             address,
             generation: this.hnsResolver.cacheGeneration,
+            resolverMetadata,
             fingerprints: [fingerprint],
             expiresAt
         };
@@ -661,6 +739,7 @@ class SkyIncludeBrowser {
             favicon: tab.favicon,
             hostingProvider: tab.hostingProvider,
             hnsProfile: tab.hnsProfile,
+            resolverInfo: tab.resolverInfo || null,
             securityInfo: tab.securityInfo,
             canGoBack: tab.view.webContents.canGoBack(),
             canGoForward: tab.view.webContents.canGoForward(),
@@ -755,6 +834,7 @@ class SkyIncludeBrowser {
         delete tab.pendingLoadUrl;
         delete tab.pendingHttpsAvailabilityCheck;
         tab.mainFrameNavigationUrl = null;
+        tab.mainFrameNavigationPending = false;
         const isCurrent = () => this.tabs.get(tabId) === tab &&
             tab.navigationToken === navigationToken && !controller.signal.aborted;
 
@@ -766,9 +846,10 @@ class SkyIncludeBrowser {
             tab.hnsProfile = null;
             tab.favicon = null;
             tab.securityInfo = null;
+            tab.resolverInfo = null;
             delete tab.hnsHttpsStatusUrl;
             delete tab.hnsTemporaryStatus;
-            this.mainWindow.webContents.send('loading-changed', { tabId, loading: true, hostingProvider: null, hnsProfile: null, securityInfo: null, favicon: null });
+            this.mainWindow.webContents.send('loading-changed', { tabId, loading: true, hostingProvider: null, hnsProfile: null, securityInfo: null, resolverInfo: null, favicon: null });
 
             let finalUrl = inputUrl;
             let loadOptions = {};
@@ -790,6 +871,7 @@ class SkyIncludeBrowser {
                 tab.hostingProvider = resolved.hostingProvider || null;
                 tab.hnsProfile = resolved.hnsProfile || null;
                 tab.securityInfo = resolved.securityInfo || null;
+                tab.resolverInfo = resolved.resolverInfo || null;
                 tab.hnsHttpsStatusUrl = resolved.hnsHttpsStatusUrl || null;
                 tab.hnsTemporaryStatus = resolved.hnsTemporaryStatus || null;
                 tab.pendingHttpsAvailabilityCheck = resolved.httpsAvailabilityCheck || null;
@@ -825,8 +907,10 @@ class SkyIncludeBrowser {
             this.log('load-url', { tabId, inputUrl, finalUrl, loadOptions });
             tab.pendingLoadUrl = finalUrl;
             tab.mainFrameNavigationUrl = finalUrl;
+            tab.mainFrameNavigationPending = true;
             await tab.view.webContents.loadURL(finalUrl, loadOptions);
             if (!isCurrent()) return;
+            tab.mainFrameNavigationPending = false;
             delete tab.pendingLoadUrl;
             tab.resolving = false;
             
@@ -872,6 +956,7 @@ class SkyIncludeBrowser {
             const failedUrl = typeof error.url === 'string' ? error.url
                 : String(error.message || '').match(/loading ['"]([^'"]+)['"]/)?.[1];
             if (failedUrl && failedUrl !== tab.mainFrameNavigationUrl) return;
+            tab.mainFrameNavigationPending = false;
             tab.resolving = false;
             delete tab.pendingLoadUrl;
             this.log('load-error', { tabId, inputUrl, message: error.message, code: error.code });
@@ -914,6 +999,7 @@ class SkyIncludeBrowser {
         delete tab.pendingHttpsAvailabilityCheck;
         tab.resolving = false;
         tab.loading = false;
+        tab.mainFrameNavigationPending = false;
         this.mainWindow.webContents.send('loading-changed', {
             tabId, loading: false, url: tab.url,
             canGoBack: tab.view.webContents.canGoBack(),
@@ -928,6 +1014,7 @@ class SkyIncludeBrowser {
         const tab = this.tabs.get(tabId);
         if (!tab) return;
         tab.loading = Boolean(tab.resolving || tab.view.webContents.isLoading());
+        if (!tab.loading) tab.mainFrameNavigationPending = false;
         this.mainWindow.webContents.send('loading-changed', {
             tabId, loading: tab.loading, url: tab.url,
             canGoBack: tab.view.webContents.canGoBack(),
@@ -1063,6 +1150,7 @@ class SkyIncludeBrowser {
                 tab.hostingProvider = null;
                 tab.hnsProfile = null;
                 tab.securityInfo = this.buildSecurityInfo('local-home');
+                tab.resolverInfo = null;
                 this.mainWindow.webContents.send('loading-changed', {
                     tabId,
                     loading: tab.loading,
@@ -1096,6 +1184,7 @@ class SkyIncludeBrowser {
                 tab.hostingProvider = null;
                 tab.hnsProfile = null;
                 tab.securityInfo = null;
+                tab.resolverInfo = null;
                 this.mainWindow.webContents.send('loading-changed', {
                     tabId,
                     loading: tab.loading,
@@ -1114,10 +1203,12 @@ class SkyIncludeBrowser {
                 tab.hostingProvider = null;
                 tab.hnsProfile = null;
                 tab.securityInfo = null;
+                tab.resolverInfo = null;
             } else if (!this.isHNSDomain(parsedUrl.hostname)) {
                 tab.hostingProvider = this.getHostingProviderForUrl(parsedUrl.toString());
                 tab.hnsProfile = null;
                 tab.securityInfo = null;
+                tab.resolverInfo = null;
             } else {
                 await this.updateHNSMetadataForNavigation(tab, parsedUrl, navigationToken, metadataToken);
                 if (this.tabs.get(tabId) !== tab || tab.navigationToken !== navigationToken ||
@@ -1163,6 +1254,24 @@ class SkyIncludeBrowser {
                 tab.hostingProvider = this.getHostingProviderForResolution(resolution);
                 tab.hnsProfile = resolution.hnsProfile || null;
                 this.attachDeferredProfile(tab, resolution.profilePromise, navigationToken, hostname);
+                const previous = tab.resolverInfo?.domain === hostname ? tab.resolverInfo : null;
+                const website = this.sanitizeResolverLookup(resolution,
+                    resolution.resolutionState === 'temporary-failure' ? 'temporary-failure' : 'resolved');
+                const preserveWebsiteLookup = resolution.cacheHit === true && previous?.website && previous.websiteAddress === resolution.address &&
+                    previous?.website?.resolver?.url === website.resolver?.url &&
+                    previous?.website?.resolver?.transport === website.resolver?.transport;
+                const port = Number(parsedUrl.port) || 443;
+                const trust = parsedUrl.protocol === 'https:'
+                    ? this.getActiveDaneTrust(hostname, { port, address: resolution.address }) : null;
+                tab.resolverInfo = {
+                    domain: hostname,
+                    website: preserveWebsiteLookup ? previous.website : website,
+                    websiteAddress: resolution.address || null,
+                    tlsa: parsedUrl.protocol === 'https:' ? (previous?.tlsaPort === port && previous.websiteAddress === resolution.address
+                        ? previous.tlsa : null) || (trust?.resolverMetadata
+                            ? { ...trust.resolverMetadata, cacheHit: true, admissionCacheHit: true } : null) : null,
+                    tlsaPort: parsedUrl.protocol === 'https:' ? port : null
+                };
                 tab.securityInfo = parsedUrl.protocol === 'http:'
                     ? this.buildSecurityInfo('hns-http', { domain: hostname })
                     : this.getActiveDaneTrust(hostname, { port: Number(parsedUrl.port) || 443, address: resolution.address })
@@ -1181,7 +1290,8 @@ class SkyIncludeBrowser {
         if (!isCurrent()) return;
         tab.hostingProvider = null;
         tab.hnsProfile = null;
-        tab.securityInfo = this.buildSecurityInfo('hns-unresolved', { domain: hostname });
+        tab.resolverInfo = { domain: hostname, website: this.sanitizeResolverLookup({}, 'temporary-failure'), tlsa: null };
+        tab.securityInfo = this.buildSecurityInfo('hns-unresolved', { domain: hostname, state: 'temporary-failure' });
     }
 
     normalizeGatewayUrl(inputUrl) {
@@ -1313,6 +1423,12 @@ class SkyIncludeBrowser {
         const generation = this.hnsResolver.cacheGeneration;
         const cached = this.hnsHttpsAvailabilityCache.get(cacheKey);
         if (cached && cached.generation === generation && Date.now() - cached.timestamp < this.hnsHttpsAvailabilityTtlMs) {
+            if (cached.resolverMetadata) {
+                tab.resolverInfo = { ...(tab.resolverInfo?.domain === check.domain ? tab.resolverInfo : { domain: check.domain, website: null }),
+                    tlsa: { ...cached.resolverMetadata, cacheHit: true, admissionCacheHit: true }, tlsaPort: check.port || 443,
+                    tlsaPurpose: 'availability-check' };
+                this.sendTabUpdated(tab);
+            }
             this.log('hns-https-availability-cache-hit', {
                 domain: check.domain,
                 state: cached.state,
@@ -1331,11 +1447,15 @@ class SkyIncludeBrowser {
             signal: tab.navigationAbortController?.signal
         });
         if (!isCurrent() || generation !== this.hnsResolver.cacheGeneration) return;
+        tab.resolverInfo = { ...(tab.resolverInfo?.domain === check.domain ? tab.resolverInfo : { domain: check.domain, website: null }),
+            tlsa: daneResult.resolverMetadata || null, tlsaPort: check.port || 443, tlsaPurpose: 'availability-check' };
+        this.sendTabUpdated(tab);
         // Outages must be retried, never remembered as a missing HTTPS website.
         if (!['verified', 'no_tlsa'].includes(daneResult.state)) return;
         this.hnsHttpsAvailabilityCache.set(cacheKey, {
             state: daneResult.state,
             generation,
+            resolverMetadata: daneResult.resolverMetadata || null,
             timestamp: Date.now()
         });
         if (daneResult.state !== 'verified') return;
@@ -1369,6 +1489,8 @@ class SkyIncludeBrowser {
 
             return {
                 ...buildNativeHnsHttpNavigation(originalUrl, resolution),
+                resolverInfo: { domain: resolution.domain || parsedUrl.hostname,
+                    website: this.sanitizeResolverLookup(resolution, 'resolved'), websiteAddress: resolution.address, tlsa: null },
                 hostingProvider,
                 hnsProfile: resolution.hnsProfile || null,
                 securityInfo: this.buildSecurityInfo('hns-http', { domain: resolution.domain }),
@@ -1393,12 +1515,15 @@ class SkyIncludeBrowser {
         const domain = resolution.domain || parsedUrl.hostname;
         const displayUrl = parsedUrl.protocol === 'https:' ? parsedUrl.toString()
             : `${parsedUrl.host}${parsedUrl.pathname}${parsedUrl.search}${parsedUrl.hash}`;
+        const website = this.sanitizeResolverLookup({ ...resolution.error, ...resolution,
+            resolverAttempts: resolution.resolverAttempts || resolution.error?.attempts }, 'temporary-failure');
         const documentUrl = this.buildHNSStatusDataUrl({
-            title: 'Native website temporarily unavailable',
+            title: website.notConfigured ? 'Choose an HNS resolver' : 'Native website temporarily unavailable',
             domain,
-            body: 'SkyInclude could not confirm this domain\'s native website because every configured HNS resolver temporarily failed. No identity or manifest fallback was opened automatically.',
+            body: website.notConfigured ? 'No active HNS resolver is configured. Open Preferences and choose a resolver to look up this native website.'
+                : 'SkyInclude could not confirm this domain\'s native website because the configured HNS resolvers temporarily failed. No identity or manifest fallback was opened automatically.',
             originalUrl,
-            error: resolution.error?.message || null,
+            error: website.reason,
             severity: 'warning',
             actions: buildTemporaryResolutionActions(originalUrl, resolution)
         });
@@ -1406,11 +1531,13 @@ class SkyIncludeBrowser {
             url: documentUrl,
             displayUrl,
             hnsTemporaryStatus: { url: originalUrl, displayUrl, documentUrl },
+            resolverInfo: { domain, website, tlsa: null },
             bypassCache: true,
             hostingProvider: null,
             hnsProfile: null,
             securityInfo: this.buildSecurityInfo('hns-unresolved', {
                 domain,
+                notConfigured: website.notConfigured,
                 state: 'temporary-failure'
             })
         };
@@ -1423,6 +1550,8 @@ class SkyIncludeBrowser {
         fallbackUrl.protocol = 'http:';
         const port = Number(parsedUrl.port) || 443;
         const admission = await this.ensureHnsHttpsAdmission(domain, resolution.address, port, options);
+        const resolverInfo = { domain, website: this.sanitizeResolverLookup(resolution, 'resolved'),
+            websiteAddress: resolution.address, tlsa: admission.resolverMetadata || null, tlsaPort: port };
         if (admission.state === 'verified') {
             return {
                 url: parsedUrl.toString(),
@@ -1432,6 +1561,7 @@ class SkyIncludeBrowser {
                 bypassCache: false,
                 hostingProvider,
                 hnsProfile: resolution.hnsProfile || null,
+                resolverInfo,
                 securityInfo: this.buildSecurityInfo('hns-dane', { domain, port, state: 'verified' })
             };
         }
@@ -1442,7 +1572,8 @@ class SkyIncludeBrowser {
             state: admission.state,
             error: admission.error,
             hostingProvider,
-            hnsProfile: resolution.hnsProfile || null
+            hnsProfile: resolution.hnsProfile || null,
+            resolverInfo
         });
     }
 
@@ -1464,7 +1595,9 @@ class SkyIncludeBrowser {
         // Ordinary consumers join an in-flight explicit refresh. An older
         // preflight cannot repopulate trust after this service's revision moved.
         const key = `${endpointKey}|${this.hnsResolver.cacheGeneration}|${revision}`;
-        if (!forceTLSA && this.getActiveDaneTrust(domain, { address, port })) return { state: 'verified' };
+        const cachedTrust = !forceTLSA && this.getActiveDaneTrust(domain, { address, port });
+        if (cachedTrust) return { state: 'verified', resolverMetadata: cachedTrust.resolverMetadata
+            ? { ...cachedTrust.resolverMetadata, cacheHit: true, admissionCacheHit: true } : null };
         this.pendingDaneAdmissions ||= new Map();
         let pending = this.pendingDaneAdmissions.get(key);
         if (pending?.controller.signal.aborted) pending = null;
@@ -1498,38 +1631,72 @@ class SkyIncludeBrowser {
 
     async inspectHnsHttpsAdmission(domain, address, port, signal, generation, forceTLSA = false, revision = 0) {
         let records;
+        let resolverMetadata;
         try {
-            records = await this.hnsResolver.resolveTLSARecords(domain, {
-                timeout: this.getDaneLookupTimeout(), port, signal, force: forceTLSA
+            const response = await this.hnsResolver.resolveTLSARecords(domain, {
+                timeout: this.getDaneLookupTimeout(), port, signal, force: forceTLSA, includeMetadata: true
             });
+            records = Array.isArray(response) ? response : response.records;
+            resolverMetadata = this.sanitizeResolverLookup(Array.isArray(response) ? {} : response,
+                records.length ? 'resolved' : 'authoritative-absence');
         } catch (error) {
             signal.throwIfAborted();
-            return { state: 'resolver_failure', error: error.message };
+            resolverMetadata = this.sanitizeResolverLookup(error, 'temporary-failure');
+            return { state: 'resolver_failure', error: resolverMetadata.reason, resolverMetadata };
         }
         signal.throwIfAborted();
-        if (!records.length) return { state: 'no_tlsa' };
+        if (!records.length) return { state: 'no_tlsa', resolverMetadata };
         const probe = await inspectHnsHttpsCertificate({
             domain, address, port, timeout: this.getDaneProbeTimeout(), signal
         });
         signal.throwIfAborted();
-        if (!probe.ok) return { state: probe.state || 'connection_failure', error: probe.error };
+        if (!probe.ok) return { state: probe.state || 'connection_failure', error: probe.error, resolverMetadata };
         const result = await this.hnsResolver.verifyDANE(domain, probe.certificate, { force: true, records, port });
         signal.throwIfAborted();
         if (generation !== this.hnsResolver.cacheGeneration ||
             revision !== (this.daneAdmissionRevisions.get(`${domain}:${port}`) || 0)) {
-            return { state: 'resolver_failure', error: 'HNS verification was refreshed. Please retry.' };
+            return { state: 'resolver_failure', error: 'HNS verification was refreshed. Please retry.', resolverMetadata };
         }
         if (result.state === 'verified') {
             const pinned = (this.daneCertificatePins || processDaneCertificatePins).get(domain);
             if (pinned && pinned !== this.getStrongCertificateFingerprint(probe.certificate)) {
-                return { state: 'certificate_changed', error: 'Restart SkyInclude Browser to verify this hostname\'s new certificate.' };
+                return { state: 'certificate_changed', error: 'Restart SkyInclude Browser to verify this hostname\'s new certificate.', resolverMetadata };
             }
-            if (!this.rememberDaneVerifiedCertificate(domain, probe.certificate, { port, address })) {
-                return { state: 'connection_failure', error: 'Could not pin the verified certificate fingerprint.' };
+            if (!this.rememberDaneVerifiedCertificate(domain, probe.certificate, { port, address, resolverMetadata })) {
+                return { state: 'connection_failure', error: 'Could not pin the verified certificate fingerprint.', resolverMetadata };
             }
         }
         this.log('hns-dane-admission', { domain, port, state: result.state });
-        return result;
+        return { ...result, resolverMetadata };
+    }
+
+    captureHnsConnectResolverConsumers(domain, port) {
+        const pending = [...this.tabs.values()].filter(tab => {
+            if (!tab.mainFrameNavigationPending || tab.navigationAbortController?.signal.aborted) return false;
+            try {
+                const url = new URL(tab.mainFrameNavigationUrl);
+                return url.protocol === 'https:' && url.hostname === domain && (Number(url.port) || 443) === port;
+            } catch { return false; }
+        });
+        // CONNECT does not identify a WebContents. Do not infer ownership when
+        // multiple tabs are navigating to the same endpoint concurrently.
+        return pending.length === 1
+            ? pending.map(tab => ({ tab, token: tab.navigationToken, url: tab.mainFrameNavigationUrl })) : [];
+    }
+
+    attachHnsConnectResolverMetadata(consumers, domain, port, admission) {
+        const currentConsumers = this.captureHnsConnectResolverConsumers(domain, port);
+        for (const { tab, token, url } of consumers) {
+            if (this.tabs.get(tab.id) !== tab || tab.navigationToken !== token ||
+                !tab.mainFrameNavigationPending || tab.navigationAbortController?.signal.aborted ||
+                tab.mainFrameNavigationUrl !== url || currentConsumers[0]?.tab !== tab) continue;
+            const current = tab.resolverInfo?.domain === domain ? tab.resolverInfo : { domain, website: null };
+            // Explicit HTTPS already recorded the preflight used for this load.
+            // A redirected load has no TLSA provenance until CONNECT admission.
+            if (current.tlsa && current.tlsaPort === port) continue;
+            tab.resolverInfo = { ...current, tlsa: admission.resolverMetadata || null, tlsaPort: port, tlsaPurpose: 'identity-check' };
+            this.sendTabUpdated(tab);
+        }
     }
 
     async showHnsHttpsLoadFailure(tabId, failedUrl, description) {
@@ -1544,10 +1711,15 @@ class SkyIncludeBrowser {
         const recent = failure && Date.now() - failure.timestamp < 30000;
         const fallback = new URL(failedUrl);
         fallback.protocol = 'http:';
+        const previous = tab.resolverInfo?.domain === parsed.hostname ? tab.resolverInfo : null;
+        const previousTls = previous?.tlsaPort === port ? previous.tlsa : null;
         const status = this.buildHNSHttpsStatusNavigation({
             originalUrl: failedUrl, fallbackUrl: fallback.toString(), domain: parsed.hostname,
             state: recent ? failure.state : 'connection_failure',
-            error: recent ? failure.error : description
+            error: recent ? failure.error : description,
+            resolverInfo: { ...(previous || { domain: parsed.hostname, website: null }),
+                tlsa: previousTls || null,
+                tlsaPort: port }
         });
         tab.navigationAbortController?.abort();
         const token = Symbol('https-failure-status');
@@ -1556,9 +1728,11 @@ class SkyIncludeBrowser {
         tab.showingHttpsFailure = true;
         tab.resolving = false;
         tab.loading = false;
+        tab.mainFrameNavigationPending = false;
         tab.displayUrl = status.displayUrl;
         tab.url = status.displayUrl;
         tab.securityInfo = status.securityInfo;
+        tab.resolverInfo = status.resolverInfo;
         tab.hnsHttpsStatusUrl = failedUrl;
         delete tab.pendingLoadUrl;
         delete tab.pendingHttpsAvailabilityCheck;
@@ -1571,7 +1745,7 @@ class SkyIncludeBrowser {
         return true;
     }
 
-    buildHNSHttpsStatusNavigation({ originalUrl, fallbackUrl, domain, state, error = null, hostingProvider = null, hnsProfile = null }) {
+    buildHNSHttpsStatusNavigation({ originalUrl, fallbackUrl, domain, state, error = null, hostingProvider = null, hnsProfile = null, resolverInfo = null }) {
         const parsedUrl = new URL(originalUrl);
         return {
             url: this.buildHNSHttpsStatusDataUrl({ domain, originalUrl, fallbackUrl, state, error }),
@@ -1580,6 +1754,7 @@ class SkyIncludeBrowser {
             bypassCache: true,
             hostingProvider,
             hnsProfile,
+            resolverInfo,
             securityInfo: this.buildSecurityInfo('hns-dane', { domain, port: Number(parsedUrl.port) || 443, state, error })
         };
     }
@@ -1623,7 +1798,7 @@ class SkyIncludeBrowser {
             },
             resolver_failure: {
                 title: 'Native HTTPS temporarily unavailable',
-                body: 'SkyInclude could not reach a resolver to verify this site\'s HNS TLSA record. Your connection has not been downgraded. Please retry.',
+                body: 'SkyInclude could not complete a DNSSEC-validated TLSA lookup for this site. Your connection has not been downgraded. Please retry.',
                 severity: 'warning'
             },
             connection_failure: {
@@ -2127,6 +2302,7 @@ ${error ? `<p class="error">${this.escapeHtml(error)}</p>` : ''}
             const port = Number(target.port) || 443;
             if (target.port === '0') throw new Error('Invalid CONNECT port');
             const isHnsHost = this.isHNSDomain(host);
+            const consumers = isHnsHost ? this.captureHnsConnectResolverConsumers(host, port) : [];
 
             let address = isHnsHost ? this.hnsProxyHosts.get(host) : rawHost;
             if (isHnsHost && !address) {
@@ -2155,6 +2331,7 @@ ${error ? `<p class="error">${this.escapeHtml(error)}</p>` : ''}
                 // cancelling/replaying the browser's request or touching TLS bytes.
                 const admission = await this.ensureHnsHttpsAdmission(host, address, port, { signal: controller.signal });
                 controller.signal.throwIfAborted();
+                this.attachHnsConnectResolverMetadata(consumers, host, port, admission);
                 this.hnsHttpsFailures ||= new Map();
                 if (admission.state !== 'verified') {
                     this.hnsHttpsFailures.set(`${host}:${port}`, { ...admission, timestamp: Date.now() });
@@ -2410,7 +2587,10 @@ ${error ? `<p class="error">${this.escapeHtml(error)}</p>` : ''}
             return;
         }
 
-        const info = this.sanitizeSecurityInfo(payload.info);
+        const activeTab = this.tabs.get(this.activeTabId);
+        const current = activeTab?.securityInfo || payload.info || {};
+        const info = this.sanitizeSecurityInfo({ ...current,
+            details: [...(current.details || []), ...this.buildResolverDetails(activeTab?.resolverInfo)] });
         const anchor = payload.anchor && typeof payload.anchor === 'object' ? payload.anchor : {};
         const parentBounds = this.mainWindow.getBounds();
         const width = 370;
@@ -2469,7 +2649,7 @@ ${error ? `<p class="error">${this.escapeHtml(error)}</p>` : ''}
 
     sanitizeSecurityInfo(info) {
         const safeInfo = info && typeof info === 'object' ? info : {};
-        const details = Array.isArray(safeInfo.details) ? safeInfo.details.slice(0, 8) : [];
+        const details = Array.isArray(safeInfo.details) ? safeInfo.details.slice(0, 24) : [];
         return {
             kicker: String(safeInfo.kicker || 'Connection').slice(0, 40),
             title: String(safeInfo.title || 'Connection information').slice(0, 80),
@@ -2479,7 +2659,7 @@ ${error ? `<p class="error">${this.escapeHtml(error)}</p>` : ''}
                 const value = Array.isArray(entry) ? entry[1] : '';
                 return [
                     String(label || 'Detail').slice(0, 48),
-                    String(value || '').slice(0, 500)
+                    String(value || '').slice(0, 1500)
                 ];
             }).filter(([, value]) => value)
         };
@@ -2510,7 +2690,7 @@ body { margin: 0; background: #fff; color: #111827; font-family: -apple-system, 
 .summary { color: #374151; font-size: 14px; line-height: 1.45; margin-bottom: 12px; }
 .row { border-top: 1px solid #eef2f7; padding: 10px 0 0; margin-top: 10px; }
 .label { color: #64748b; font-size: 11px; font-weight: 800; margin-bottom: 4px; text-transform: uppercase; }
-.value { color: #111827; font-size: 13px; line-height: 1.35; overflow-wrap: anywhere; user-select: text; }
+.value { color: #111827; font-size: 13px; line-height: 1.35; overflow-wrap: anywhere; white-space: pre-line; user-select: text; }
 </style>
 </head>
 <body>
@@ -3221,6 +3401,7 @@ document.querySelectorAll('.copy').forEach(button => {
                 favicon: tab.favicon,
                 hostingProvider: tab.hostingProvider,
                 hnsProfile: tab.hnsProfile,
+                resolverInfo: tab.resolverInfo || null,
                 securityInfo: tab.securityInfo,
                 active: tab.id === this.activeTabId
             }));

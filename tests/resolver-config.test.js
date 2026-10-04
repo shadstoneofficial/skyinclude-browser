@@ -1,7 +1,10 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const {
+    ARCHIVED_RESOLVERS,
+    BUILT_IN_RESOLVERS,
     formatResolverSetting,
+    isRetiredResolver,
     normalizeResolverDescriptor,
     normalizeResolverList
 } = require('../resolver-config');
@@ -50,16 +53,47 @@ test('infers known resolver transports and DoH paths', () => {
         normalizeResolverDescriptor('custom.example').url,
         'https://custom.example/dns-query'
     );
-    assert.deepEqual(
-        normalizeResolverDescriptor('https://resolve.shakestation.io/dns-query'),
-        {
-            id: 'shakestation',
-            name: 'Shakestation DoH',
-            transport: 'doh-wire',
-            url: 'https://resolve.shakestation.io/dns-query',
-            enabled: true
-        }
-    );
+    assert.equal(normalizeResolverDescriptor('https://resolve.shakestation.io/dns-query'), null);
+});
+
+test('active defaults use the Web3DNS binary root while retired metadata remains archival only', () => {
+    assert.deepEqual(normalizeResolverList(BUILT_IN_RESOLVERS).map(({ transport, url }) => ({ transport, url })), [
+        { transport: 'doh-wire', url: 'https://hnsdoh.com/dns-query' },
+        { transport: 'doh-wire', url: 'https://doh.web3dns.net/' }
+    ]);
+    assert.equal(ARCHIVED_RESOLVERS[0].status, 'retired');
+    assert.deepEqual(normalizeResolverList(ARCHIVED_RESOLVERS), []);
+});
+
+test('Web3DNS known binary root is not rewritten; explicit paths and legacy JSON remain intact', () => {
+    for (const url of ['https://doh.web3dns.net', 'https://doh.web3dns.net/', 'doh.web3dns.net']) {
+        const resolver = normalizeResolverDescriptor(url);
+        assert.equal(resolver.transport, 'doh-wire');
+        assert.equal(resolver.url, 'https://doh.web3dns.net/');
+    }
+    assert.equal(normalizeResolverDescriptor('https://doh.web3dns.net/custom?q=1').url,
+        'https://doh.web3dns.net/custom?q=1');
+    assert.equal(normalizeResolverDescriptor('https://doh.web3dns.net/dns-query').url,
+        'https://doh.web3dns.net/dns-query');
+    assert.equal(normalizeResolverDescriptor('https://doh.web3dns.net.evil.example/').url,
+        'https://doh.web3dns.net.evil.example/dns-query');
+    assert.equal(normalizeResolverDescriptor('https://api.web3dns.net/').transport, 'dns-json');
+    assert.equal(normalizeResolverDescriptor('dns-json https://doh.web3dns.net/').transport, 'dns-json');
+});
+
+test('retirement matches the exact hostname, never a custom id or spoofed prefix', () => {
+    for (const value of ['https://resolve.shakestation.io/dns-query', 'dns-json https://RESOLVE.SHAKESTATION.IO/custom',
+        'resolve.shakestation.io', 'http://resolve.shakestation.io.:8080/custom',
+        { id: 'other', endpoint: 'https://resolve.shakestation.io/', enabled: false }]) {
+        assert.equal(isRetiredResolver(value), true);
+        assert.equal(normalizeResolverDescriptor(value), null);
+    }
+    for (const value of [{ id: 'shakestation', url: 'https://custom.example/dns-query' },
+        'https://resolve.shakestation.io.evil.example/', 'https://other.resolve.shakestation.io/',
+        'https://safe.example/resolve.shakestation.io']) {
+        assert.equal(isRetiredResolver(value), false);
+        assert.ok(normalizeResolverDescriptor(value));
+    }
 });
 
 test('never treats native DNS IP addresses as DoH URLs', () => {
