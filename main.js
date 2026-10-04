@@ -1047,7 +1047,70 @@ class SkyIncludeBrowser {
         this.stopTabLoading(tabId);
         tab.navigationToken = Symbol('reload');
         tab.navigationAbortController = new AbortController();
-        tab.view.webContents.reload();
+        const contents = tab.view.webContents;
+        const token = tab.navigationToken;
+        const url = contents.getURL();
+        const signal = tab.navigationAbortController.signal;
+        // Electron 42's check_for_repost path can silently do nothing on POST
+        // entries. Never automatically repeat an action: offer explicit recovery
+        // only if Chromium has not started navigation, and retain its own body.
+        const cleanup = () => {
+            clearTimeout(timer);
+            contents.removeListener('did-start-navigation', onNavigation);
+            contents.removeListener('destroyed', cleanup);
+            signal.removeEventListener('abort', cleanup);
+        };
+        const onNavigation = (_event, _url, _inPlace, isMainFrame) => {
+            if (isMainFrame) cleanup();
+        };
+        const timer = setTimeout(() => {
+            cleanup();
+            this.confirmReloadRecovery(tabId, token, url);
+        }, 1500);
+        contents.on('did-start-navigation', onNavigation);
+        contents.once('destroyed', cleanup);
+        signal.addEventListener('abort', cleanup, { once: true });
+        try { contents.reload(); } catch (error) { cleanup(); throw error; }
+    }
+
+    async confirmReloadRecovery(tabId, token, url) {
+        const tab = this.tabs.get(tabId);
+        const contents = tab?.view.webContents;
+        const current = () => this.tabs.get(tabId) === tab && this.activeTabId === tabId &&
+            !contents.isDestroyed() && tab.navigationToken === token &&
+            !tab.navigationAbortController.signal.aborted && contents.getURL() === url;
+        if (!tab || !current() || tab.reloadRecoveryPending) return;
+        tab.reloadRecoveryPending = true;
+        let attached = false;
+        try {
+            // Do not commandeer a developer's debugger session. This connection
+            // is local to this webContents; no remote-debugging port is opened.
+            if (contents.debugger.isAttached()) throw new Error('debugger-in-use');
+            contents.debugger.attach('1.3');
+            attached = true;
+            const { frameTree } = await contents.debugger.sendCommand('Page.getFrameTree');
+            const loaderId = frameTree?.frame?.loaderId;
+            if (!loaderId || !current()) return;
+            const { response } = await dialog.showMessageBox(this.mainWindow, {
+                type: 'warning', title: 'Reload this page?',
+                message: 'The page did not start reloading.',
+                detail: 'Reloading may resend form data and repeat an action, such as a login, post, or purchase. Continue only if you want to repeat that action.',
+                buttons: ['Cancel', 'Reload and resend'], defaultId: 0, cancelId: 0,
+                noLink: true
+            });
+            if (response !== 1 || !current()) return;
+            // Chromium retains the method, body, history and native hostname.
+            // loaderId also rejects a racing document change inside Chromium.
+            await contents.debugger.sendCommand('Page.reload', { loaderId });
+        } catch (error) {
+            if (current()) this.sendStatusMessage(
+                'Reload could not continue safely. Cancel any debugging session and try again, or reopen the page.', 'error');
+        } finally {
+            if (attached && !contents.isDestroyed() && contents.debugger.isAttached()) {
+                try { contents.debugger.detach(); } catch { /* Target may close during cleanup. */ }
+            }
+            tab.reloadRecoveryPending = false;
+        }
     }
 
     isExpectedNavigationAbort(error) {
