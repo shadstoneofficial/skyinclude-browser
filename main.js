@@ -493,9 +493,15 @@ class SkyIncludeBrowser {
                 },
                 connection_failure: {
                     level: 'danger',
-                    title: 'HTTPS certificate probe failed',
-                    summary: 'SkyInclude could not inspect this site\'s HTTPS certificate.',
-                    dane: options.error || 'HTTPS certificate probe failed'
+                    title: 'HTTPS connection failed',
+                    summary: 'SkyInclude could not complete the secure connection. No insecure connection was opened.',
+                    dane: options.error || 'Secure connection setup failed'
+                },
+                admission_timeout: {
+                    level: 'warning',
+                    title: 'HTTPS verification timed out',
+                    summary: 'The secure connection deadline expired. Retry without disabling DNSSEC or certificate checks.',
+                    dane: options.error || 'Secure connection deadline exceeded'
                 }
             };
             const details = states[state] || states.connection_failure;
@@ -534,7 +540,8 @@ class SkyIncludeBrowser {
         const attempts = (Array.isArray(value.resolverAttempts) ? value.resolverAttempts : Array.isArray(value.attempts) ? value.attempts : [])
             .slice(0, 12).map(attempt => ({
                 resolver: provider(attempt.resolver),
-                status: /^[A-Z0-9_-]+$/.test(String(attempt.status || '')) ? String(attempt.status).slice(0, 60) : 'ERROR'
+                status: /^[A-Z0-9_-]+$/.test(String(attempt.status || '')) ? String(attempt.status).slice(0, 60) : 'ERROR',
+                ...(Number.isFinite(attempt.elapsedMs) && attempt.elapsedMs >= 0 ? { elapsedMs: Math.round(attempt.elapsedMs) } : {})
             }));
         const state = value.resolverResolutionState || value.resolutionState || fallbackState;
         const unvalidated = attempts.some(attempt => attempt.status === 'DNSSEC_UNAUTHENTICATED');
@@ -715,7 +722,9 @@ class SkyIncludeBrowser {
             return defaultMs;
         }
 
-        return Math.min(configuredTimeout, 30000);
+        // Per-stage limits must leave room for fallback and the certificate
+        // probe inside the CONNECT deadline, not each consume that deadline.
+        return Math.min(configuredTimeout, defaultMs);
     }
 
     getDaneLookupTimeout() {
@@ -731,8 +740,13 @@ class SkyIncludeBrowser {
             return;
         }
 
+        if (tab.statusNavigationToken !== tab.navigationToken) {
+            tab.statusNavigationToken = tab.navigationToken;
+            tab.statusNavigationId = (tab.statusNavigationId || 0) + 1;
+        }
         this.mainWindow.webContents.send('tab-updated', {
             tabId: tab.id,
+            statusNavigationId: tab.statusNavigationId,
             url: tab.url,
             title: tab.title,
             loading: tab.loading,
@@ -1483,6 +1497,7 @@ class SkyIncludeBrowser {
         const navigationToken = tab.navigationToken;
         const isCurrent = () => this.tabs.get(tabId) === tab && tab.id === this.activeTabId &&
             tab.navigationToken === navigationToken && !tab.loading &&
+            !/^https:/.test(tab.url) &&
             this.getHostnameForDisplayUrl(tab.url) === check.domain;
         if (!isCurrent()) return;
 
@@ -1504,7 +1519,7 @@ class SkyIncludeBrowser {
             if (cached.state === 'verified') {
                 this.sendStatusMessage(`DANE-verified HTTPS is available for ${check.domain}.`, 'success', {
                     label: 'Open HTTPS',
-                    url: check.upgradeUrl
+                    url: check.upgradeUrl, tabId, sourceUrl: tab.url, statusNavigationId: tab.statusNavigationId
                 });
             }
             return;
@@ -1529,7 +1544,7 @@ class SkyIncludeBrowser {
 
         this.sendStatusMessage(`DANE-verified HTTPS is available for ${check.domain}.`, 'success', {
             label: 'Open HTTPS',
-            url: check.upgradeUrl
+            url: check.upgradeUrl, tabId, sourceUrl: tab.url, statusNavigationId: tab.statusNavigationId
         });
     }
 
@@ -1644,7 +1659,7 @@ class SkyIncludeBrowser {
         });
     }
 
-    async ensureHnsHttpsAdmission(domain, address, port = 443, { signal, forceTLSA = false } = {}) {
+    async ensureHnsHttpsAdmission(domain, address, port = 443, { signal, forceTLSA = false, onProgress } = {}) {
         domain = this.normalizeGatewayHost(String(domain || '').toLowerCase());
         signal?.throwIfAborted();
         const endpointKey = `${domain}:${port}|${address}`;
@@ -1670,15 +1685,22 @@ class SkyIncludeBrowser {
         if (pending?.controller.signal.aborted) pending = null;
         if (!pending) {
             const controller = new AbortController();
-            pending = { controller, consumers: 0 };
+            pending = { controller, consumers: 0, observers: new Set(), progress: { stage: 'tlsa' } };
             this.pendingDaneAdmissions.set(key, pending);
             const generation = this.hnsResolver.cacheGeneration;
-            pending.promise = this.inspectHnsHttpsAdmission(domain, address, port, controller.signal, generation, forceTLSA, revision)
+            pending.promise = this.inspectHnsHttpsAdmission(domain, address, port, controller.signal, generation, forceTLSA, revision, progress => {
+                pending.progress = progress;
+                for (const observer of pending.observers) observer(progress);
+            })
                 .finally(() => {
                     if (this.pendingDaneAdmissions.get(key) === pending) this.pendingDaneAdmissions.delete(key);
                 });
         }
         pending.consumers += 1;
+        if (onProgress) {
+            pending.observers.add(onProgress);
+            onProgress(pending.progress);
+        }
         return new Promise((resolve, reject) => {
             let finished = false;
             const finish = (callback, value) => {
@@ -1686,22 +1708,24 @@ class SkyIncludeBrowser {
                 finished = true;
                 signal?.removeEventListener('abort', abort);
                 pending.consumers -= 1;
+                if (onProgress) pending.observers.delete(onProgress);
                 if (!pending.consumers) pending.controller.abort();
                 callback(value);
             };
-            const abort = () => finish(reject, Object.assign(new Error('Navigation cancelled'), { name: 'AbortError' }));
+            const abort = () => finish(reject, signal?.reason || Object.assign(new Error('Navigation cancelled'), { name: 'AbortError' }));
             signal?.addEventListener('abort', abort, { once: true });
             pending.promise.then(result => finish(resolve, result), error => finish(reject, error));
             if (signal?.aborted) abort();
         });
     }
 
-    async inspectHnsHttpsAdmission(domain, address, port, signal, generation, forceTLSA = false, revision = 0) {
+    async inspectHnsHttpsAdmission(domain, address, port, signal, generation, forceTLSA = false, revision = 0, onProgress = () => {}) {
         let records;
         let resolverMetadata;
         try {
             const response = await this.hnsResolver.resolveTLSARecords(domain, {
-                timeout: this.getDaneLookupTimeout(), port, signal, force: forceTLSA, includeMetadata: true
+                timeout: this.getDaneLookupTimeout(), port, signal, force: forceTLSA, includeMetadata: true,
+                onProgress: metadata => onProgress({ stage: 'tlsa', resolverMetadata: this.sanitizeResolverLookup(metadata, 'pending') })
             });
             records = Array.isArray(response) ? response : response.records;
             resolverMetadata = this.sanitizeResolverLookup(Array.isArray(response) ? {} : response,
@@ -1713,6 +1737,7 @@ class SkyIncludeBrowser {
         }
         signal.throwIfAborted();
         if (!records.length) return { state: 'no_tlsa', resolverMetadata };
+        onProgress({ stage: 'certificate-probe', resolverMetadata });
         const probe = await inspectHnsHttpsCertificate({
             domain, address, port, timeout: this.getDaneProbeTimeout(), signal
         });
@@ -1785,7 +1810,7 @@ class SkyIncludeBrowser {
             state: recent ? failure.state : 'connection_failure',
             error: recent ? failure.error : description,
             resolverInfo: { ...(previous || { domain: parsed.hostname, website: null }),
-                tlsa: previousTls || null,
+                tlsa: previousTls || (recent ? failure.resolverMetadata : null) || null,
                 tlsaPort: port }
         });
         tab.navigationAbortController?.abort();
@@ -1870,8 +1895,13 @@ class SkyIncludeBrowser {
             },
             connection_failure: {
                 title: 'HTTPS Connection Failed',
-                body: 'SkyInclude could not inspect this site\'s HTTPS certificate.',
+                body: 'SkyInclude could not complete the secure connection. Please retry. Your connection has not been downgraded.',
                 severity: 'danger'
+            },
+            admission_timeout: {
+                title: 'Native HTTPS verification timed out',
+                body: 'The secure connection deadline expired before verification and connection could finish. Please retry. No form was automatically resubmitted and your connection has not been downgraded.',
+                severity: 'warning'
             }
         };
         const details = states[state] || states.connection_failure;
@@ -2320,12 +2350,25 @@ ${error ? `<p class="error">${this.escapeHtml(error)}</p>` : ''}
 
     async handleHnsProxyConnect(clientReq, clientSocket, head) {
         const controller = new AbortController();
+        const startedAt = Date.now();
+        let context = { stage: 'target' };
+        let endpoint;
+        let consumers = [];
+        const recordFailure = (state, error) => {
+            if (!endpoint || established) return;
+            const failure = { state, error, ...context, elapsedMs: Date.now() - startedAt, timestamp: Date.now() };
+            this.hnsHttpsFailures ||= new Map();
+            this.hnsHttpsFailures.set(endpoint, failure);
+            const [domain, servicePort] = endpoint.split(':');
+            this.attachHnsConnectResolverMetadata(consumers, domain, Number(servicePort), failure);
+        };
         let upstreamSocket;
         let established = false;
         let timedOut = false;
         const timer = setTimeout(() => {
             timedOut = true;
-            controller.abort();
+            recordFailure('admission_timeout', `Secure connection deadline exceeded during ${context.stage}. Please retry.`);
+            controller.abort(Object.assign(new Error('Secure connection deadline exceeded'), { name: 'AbortError', code: 'CONNECT_TIMEOUT' }));
             upstreamSocket?.destroy(new Error('Website connection timed out'));
             if (!clientSocket.destroyed && !clientSocket.writableEnded) {
                 clientSocket.end('HTTP/1.1 504 Gateway Timeout\r\n\r\n');
@@ -2333,7 +2376,7 @@ ${error ? `<p class="error">${this.escapeHtml(error)}</p>` : ''}
         }, this.proxyConnectionTimeoutMs);
         const cancel = () => {
             clearTimeout(timer);
-            controller.abort();
+            controller.abort(Object.assign(new Error('Client disconnected during secure connection'), { name: 'AbortError', code: 'CLIENT_DISCONNECTED' }));
             upstreamSocket?.destroy();
         };
         // Read while resolving so a disconnected client is noticed immediately.
@@ -2369,11 +2412,15 @@ ${error ? `<p class="error">${this.escapeHtml(error)}</p>` : ''}
             const port = Number(target.port) || 443;
             if (target.port === '0') throw new Error('Invalid CONNECT port');
             const isHnsHost = this.isHNSDomain(host);
-            const consumers = isHnsHost ? this.captureHnsConnectResolverConsumers(host, port) : [];
+            consumers = isHnsHost ? this.captureHnsConnectResolverConsumers(host, port) : [];
+            endpoint = isHnsHost ? `${host}:${port}` : null;
+            context = { stage: 'website-dns' };
+            // Do not attribute a previous attempt's failure to this connection.
+            if (endpoint) this.hnsHttpsFailures?.delete(endpoint);
 
             let address = isHnsHost ? this.hnsProxyHosts.get(host) : rawHost;
             if (isHnsHost && !address) {
-                const resolution = await this.resolveHNS(host, { signal: controller.signal });
+                const resolution = await this.resolveHNS(host, { signal: controller.signal, timeout: this.getDaneLookupTimeout() });
                 address = resolution && resolution.address;
                 if (address) {
                     this.hnsProxyHosts.set(host, address);
@@ -2396,7 +2443,11 @@ ${error ? `<p class="error">${this.escapeHtml(error)}</p>` : ''}
                 // A cold HTTP→HTTPS redirect reaches CONNECT before Chromium's
                 // certificate verifier. Admit the exact endpoint here without
                 // cancelling/replaying the browser's request or touching TLS bytes.
-                const admission = await this.ensureHnsHttpsAdmission(host, address, port, { signal: controller.signal });
+                context = { stage: 'tlsa' };
+                const admission = await this.ensureHnsHttpsAdmission(host, address, port, {
+                    signal: controller.signal, onProgress: progress => { context = progress; }
+                });
+                context = { ...context, resolverMetadata: admission.resolverMetadata || context.resolverMetadata || null };
                 controller.signal.throwIfAborted();
                 this.attachHnsConnectResolverMetadata(consumers, host, port, admission);
                 this.hnsHttpsFailures ||= new Map();
@@ -2415,6 +2466,7 @@ ${error ? `<p class="error">${this.escapeHtml(error)}</p>` : ''}
                 port
             });
 
+            context = { ...context, stage: 'upstream-connect' };
             upstreamSocket = net.connect(port, address, () => {
                 clearTimeout(timer);
                 if (clientSocket.destroyed || controller.signal.aborted) {
@@ -2433,6 +2485,7 @@ ${error ? `<p class="error">${this.escapeHtml(error)}</p>` : ''}
 
             upstreamSocket.on('error', error => {
                 clearTimeout(timer);
+                if (!controller.signal.aborted) recordFailure('connection_failure', 'The verified server connection failed. Please retry.');
                 this.log('hns-proxy-connect-error', { host, address, message: error.message });
                 if (!clientSocket.destroyed && !clientSocket.writableEnded) {
                     if (established) clientSocket.destroy();
@@ -2445,7 +2498,14 @@ ${error ? `<p class="error">${this.escapeHtml(error)}</p>` : ''}
             });
         } catch (error) {
             clearTimeout(timer);
-            this.log('hns-proxy-connect-request-error', { url: clientReq.url, message: error.message });
+            const reason = controller.signal.aborted ? controller.signal.reason : error;
+            if (!controller.signal.aborted) recordFailure('connection_failure', 'Secure connection setup failed. Please retry.');
+            // No URL, query string, form data or unsanitized transport errors.
+            this.log('hns-proxy-connect-request-error', {
+                code: reason?.code || 'CONNECT_FAILURE', stage: context.stage,
+                elapsedMs: Date.now() - startedAt,
+                resolverMetadata: context.resolverMetadata || null
+            });
             if (!clientSocket.destroyed && !clientSocket.writableEnded) {
                 clientSocket.end(timedOut ? 'HTTP/1.1 504 Gateway Timeout\r\n\r\n' : 'HTTP/1.1 500 Internal Server Error\r\n\r\n');
             }

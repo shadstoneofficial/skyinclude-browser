@@ -508,4 +508,21 @@ test('real native HTTPS tunnel admits cold 301/307/308 redirects and preserves S
             url: '/viewtopic.php?t=280', body });
     }
     assert.equal(received.length, 3, 'certificate probes must never replay an HTTP request');
+    // Simulate the five-minute admission expiring before a same-host link or
+    // form opens a fresh CONNECT. Neither path may reconstruct/replay a body.
+    for (const method of ['GET', 'POST']) {
+        for (const trust of browser.daneVerifiedCertificates.values()) trust.expiresAt = Date.now() - 1;
+        assert.equal(browser.getActiveDaneTrust('handshake.mercenary', { address: '127.0.0.1', port: securePort }), null);
+        const socket = await tunnel(proxyPort, `handshake.mercenary:${securePort}`);
+        const secure = tls.connect({ socket, servername: 'handshake.mercenary', rejectUnauthorized: false });
+        await once(secure, 'secureConnect');
+        assert.equal(browser.isDaneVerifiedCertificateAllowed('handshake.mercenary', secure.getPeerCertificate()), true);
+        const body = method === 'POST' ? 'inert=expiry-regression' : '';
+        secure.write(`${method} /ucp.php?mode=login HTTP/1.1\r\nHost: handshake.mercenary:${securePort}\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`);
+        secure.resume();
+        await once(secure, 'end');
+        assert.deepEqual(received.at(-1), { sni: 'handshake.mercenary', host: `handshake.mercenary:${securePort}`,
+            method, url: '/ucp.php?mode=login', body });
+    }
+    assert.equal(received.length, 5, 'exactly one request per expired-trust link/form navigation');
 });
