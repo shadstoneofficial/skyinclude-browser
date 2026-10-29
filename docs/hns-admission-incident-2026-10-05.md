@@ -79,6 +79,30 @@ still required; this dependency refresh does not certify live resolver uptime.
 References: [Electron advisory](https://github.com/advisories/GHSA-x562-297c-g43g),
 [Undici advisory](https://github.com/advisories/GHSA-2m5v-pch6-74hx).
 
+Packaged arm64 acceptance at source `110c0bdc0976ecbb02efabb245571b40671998bf`:
+
+- 17/18 broad synthetic cases passed: direct DANE, all redirect methods,
+  outages/recovery, missing/malformed/unvalidated TLSA, certificate mismatch,
+  cross-port protections and rapid startup. The synthetic POST toolbar case
+  timed out waiting for a resend; it does not operate the native recovery sheet.
+  Retained as a failed synthetic case, not relabeled as a pass.
+- Separate native-toolbar and actual-sheet checks passed for HTTP and DANE
+  HTTPS POST: Cancel sent nothing; each explicit confirmation sent exactly one
+  original-body POST. HNS Host, SNI and TLSA service port were preserved.
+  Dialog options confirmed Cancel as default/cancel; the actual Cancel action
+  was clicked, not a successful Return-key test.
+- PR-specific packaged checks passed: real verified availability banner,
+  clearing on HTTP→HTTPS and cross-host failure, no redundant HTTPS offer,
+  and fresh TLSA verification after simulated trust expiry/cache invalidation
+  followed by same-host navigation. This is not a natural five-minute wait.
+- All tests used disposable profiles and loopback fixtures. Test CA trust was
+  scoped to child processes; no installed app or system trust store changed.
+  Runtime hashes matched the commit. The local app is unsigned; these checks
+  are not evidence of signing/notarization or live resolver reliability.
+
+The follow-up candidate version is 0.1.28. Fresh CI and signed-package checks
+are required before handoff. No public release publication is included.
+
 1. Complete review and packaged acceptance of these immediate UI/diagnostic fixes.
 2. Investigate HNSDoH 403 with operator evidence and timestamps, without assuming
    a rate-limit, blocking policy or server-side cause. Do not hammer the endpoint.
