@@ -322,7 +322,7 @@ class HNSResolver {
         // A trusted explicit Retry must not join an ordinary producer whose
         // resolver candidates have already been excluded by cooldown.
         const ignoreCooldown = options.ignoreCooldown === true;
-        const pendingKey = `${configurationKey}|${cacheKey}|${ignoreCooldown ? 'retry' : 'normal'}`;
+        const pendingKey = `${configurationKey}|${cacheKey}|${ignoreCooldown ? 'retry' : 'normal'}|${options.timeout || 'default'}`;
         let pending = this.pendingResolutions.get(pendingKey);
         if (!pending) {
             const controller = new AbortController();
@@ -330,6 +330,7 @@ class HNSResolver {
             const generation = this.cacheGeneration;
             pending.promise = this.resolveUncachedDomain(cleanDomain, {
                 signal: controller.signal,
+                timeout: options.timeout,
                 ignoreCooldown
             })
                 .then(result => {
@@ -758,6 +759,9 @@ class HNSResolver {
         for (const candidate of candidateState.available) {
             const { resolver, configuredIndex } = candidate;
             const startedAt = Date.now();
+            options.onProgress?.(this.getFailedResolutionMetadata(cleanDomain, requestedTypes, {
+                attempts: [...attempts, { resolver: this.getPublicResolverInfo(resolver), status: 'PENDING', elapsedMs: 0, configuredIndex }]
+            }));
             const controller = new AbortController();
             const abort = () => controller.abort();
             options.signal?.addEventListener('abort', abort, { once: true });
@@ -1332,9 +1336,13 @@ class HNSResolver {
             const controller = new AbortController();
             const revision = Symbol('TLSA request');
             this.tlsaRevisions.set(cacheKey, revision);
-            pending = { controller, consumers: 0, settled: false, generation: this.cacheGeneration };
+            pending = { controller, consumers: 0, settled: false, generation: this.cacheGeneration, observers: new Set() };
             pending.promise = this.queryRecordSet(tlsaName, ['TLSA'], {
                 ...options,
+                onProgress: progress => {
+                    pending.progress = progress;
+                    for (const observer of pending.observers) observer(progress);
+                },
                 signal: controller.signal,
                 requireAuthenticated: true,
                 ignoreCooldown: options.force === true
@@ -1363,7 +1371,16 @@ class HNSResolver {
             });
             this.pendingTLSAResolutions.set(cacheKey, pending);
         }
-        const result = await this.joinPendingResolution(cacheKey, pending, options.signal, this.pendingTLSAResolutions);
+        if (options.onProgress) {
+            pending.observers.add(options.onProgress);
+            if (pending.progress) options.onProgress(pending.progress);
+        }
+        let result;
+        try {
+            result = await this.joinPendingResolution(cacheKey, pending, options.signal, this.pendingTLSAResolutions);
+        } finally {
+            if (options.onProgress) pending.observers.delete(options.onProgress);
+        }
         return options.includeMetadata === true ? {
             records: result.records,
             ...this.getResolutionMetadata(result),

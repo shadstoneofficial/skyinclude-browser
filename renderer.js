@@ -289,6 +289,7 @@ class SkyIncludeRenderer {
     // Navigation methods
     async navigateToUrl(url) {
         if (!url.trim()) return;
+        if (this.currentStatusAction) this.hideStatus();
         const requestId = ++this.navigationRequestId;
         // Enter (or another explicit navigation) ends this draft. Set the
         // baseline before IPC so redirects update normally, but a new edit
@@ -395,6 +396,8 @@ class SkyIncludeRenderer {
     }
 
     updateAddressBar(url, { force = false } = {}) {
+        if (this.currentStatusAction && (this.currentStatusAction.tabId !== this.activeTabId ||
+            this.currentStatusAction.sourceUrl !== url)) this.hideStatus();
         const changingTab = this.addressBarTabId !== null && this.addressBarTabId !== this.activeTabId;
         const preserveDraft = !force && !changingTab && this.hasAddressDraft();
         // Page state must advance even while the user edits the field. Keep a
@@ -414,6 +417,7 @@ class SkyIncludeRenderer {
 
     updateLoadingState(data) {
         if (data.tabId === this.activeTabId) {
+            if (data.loading && this.currentStatusAction) this.hideStatus();
             this.showLoading(data.loading);
             if (!data.loading && data.url) {
                 this.updateAddressBar(data.url);
@@ -665,6 +669,9 @@ class SkyIncludeRenderer {
     }
 
     updateTabState(data) {
+        if (this.currentStatusAction?.tabId === data.tabId &&
+            data.statusNavigationId !== undefined &&
+            this.currentStatusAction.statusNavigationId !== data.statusNavigationId) this.hideStatus();
         const tab = this.tabs.get(data.tabId);
         if (!tab) {
             return;
@@ -855,11 +862,18 @@ class SkyIncludeRenderer {
 
     // Status and error handling
     showStatus(message, type = 'info', action = null) {
+        if (action?.sourceUrl && (action.tabId !== this.activeTabId ||
+            action.sourceUrl !== this.currentUrl || this.isLoading ||
+            (action.statusNavigationId !== undefined &&
+                action.statusNavigationId !== this.tabs.get(action.tabId)?.statusNavigationId))) return;
+        const statusRevision = this.statusRevision = (this.statusRevision || 0) + 1;
         this.statusText.textContent = message;
         this.statusBar.className = `status-bar ${type}`;
         this.statusBar.classList.remove('hidden');
         this.setStatusBarVisible(true);
-        this.currentStatusAction = action && action.url ? action : null;
+        this.currentStatusAction = action && action.url ? {
+            ...action, tabId: this.activeTabId, sourceUrl: this.currentUrl
+        } : null;
 
         if (this.currentStatusAction) {
             this.statusActionBtn.textContent = this.currentStatusAction.label || 'Open';
@@ -872,7 +886,7 @@ class SkyIncludeRenderer {
         }
 
         if (!this.currentStatusAction) {
-            setTimeout(() => this.hideStatus(), 5000);
+            setTimeout(() => { if (this.statusRevision === statusRevision) this.hideStatus(); }, 5000);
         }
     }
 
@@ -882,8 +896,10 @@ class SkyIncludeRenderer {
         }
 
         const url = this.currentStatusAction.url;
+        const current = this.currentStatusAction.tabId === this.activeTabId &&
+            this.currentStatusAction.sourceUrl === this.currentUrl && !this.isLoading;
         this.hideStatus();
-        this.navigateToUrl(url);
+        if (current) this.navigateToUrl(url);
     }
 
     showError(message) {
@@ -891,6 +907,7 @@ class SkyIncludeRenderer {
     }
 
     hideStatus() {
+        this.statusRevision = (this.statusRevision || 0) + 1;
         this.statusBar.classList.add('hidden');
         this.setStatusBarVisible(false);
         this.currentStatusAction = null;

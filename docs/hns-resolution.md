@@ -2,6 +2,25 @@
 
 SkyInclude Browser supports Handshake (HNS) domains without requiring the operating system DNS resolver to know about HNS.
 
+### HTTPS admission reliability
+
+The browser uses remote resolvers; initial failures are not a local blockchain
+sync phase. Address resolution and authenticated TLSA identity checks are separate.
+Web3DNS may supply an address without being able to provide validated TLSA data.
+HTTP 403, timeouts and unvalidated answers are not authoritative website absence
+and must not authorize DANE or automatic manifest fallback.
+
+CONNECT retains a 15-second total setup deadline. DNS attempts are capped at
+2.5 seconds and certificate probes at 4 seconds (smaller configured timeouts still
+apply), reserving time for the default fallback sequence. Custom resolver lists
+may still exceed the total budget. Deadline expiry and client disconnect are
+distinct diagnostics; a timeout retains available TLSA attempt provenance and
+offers an explicit retry, without automatically replaying forms or weakening trust.
+HTTPS availability actions are scoped to their tab, page and navigation revision.
+
+See [the October 5 incident and review gates](hns-admission-incident-2026-10-05.md)
+for evidence, tests, and the separate unresolved HNSDoH reliability investigation.
+
 ## Flow
 
 1. User enters a URL such as `setup.skyinclude`.
