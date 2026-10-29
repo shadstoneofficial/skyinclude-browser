@@ -67,6 +67,18 @@ No version bump, installed-app change, binary build or release is included.
 
 ## Roadmap / unresolved work
 
+### October 29 acceptance restart
+
+The unchanged PR passed all 262 tests again. Its previous clean dependency audit
+was superseded by newly published advisories. Acceptance now uses Electron
+42.11.18 (same major), Undici 7.30.1, nested build-time Undici 6.29.1 and fast-uri
+3.1.9. Electron Builder remains 26.15.3. The updated lockfile reports zero
+vulnerabilities and all 262 tests pass. Packaged acceptance and fresh CI are
+still required; this dependency refresh does not certify live resolver uptime.
+
+References: [Electron advisory](https://github.com/advisories/GHSA-x562-297c-g43g),
+[Undici advisory](https://github.com/advisories/GHSA-2m5v-pch6-74hx).
+
 1. Complete review and packaged acceptance of these immediate UI/diagnostic fixes.
 2. Investigate HNSDoH 403 with operator evidence and timestamps, without assuming
    a rate-limit, blocking policy or server-side cause. Do not hammer the endpoint.

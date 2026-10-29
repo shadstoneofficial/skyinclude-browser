@@ -61,7 +61,7 @@ test('locked stable toolchain uses fetch without the vulnerable shared-cache dep
         assert.match(version, /^\d+\.\d+\.\d+$/);
         assert.equal(lock.packages[`node_modules/${name}`].version, version);
     }
-    assert.equal(manifest.devDependencies.electron, '42.11.3');
+    assert.equal(manifest.devDependencies.electron, '42.11.18');
     assert.equal(manifest.devDependencies['electron-builder'], '26.15.3');
     assert.equal(manifest.overrides['@electron/get'], '$@electron/get');
     assert.equal(lock.packages['node_modules/app-builder-lib'].version, '26.15.3');
@@ -75,7 +75,8 @@ test('locked stable toolchain uses fetch without the vulnerable shared-cache dep
             assert.ok(minimum && (minor > minimum[0] || minor === minimum[0] && patch >= minimum[1]), version);
         }
     }
-    assert.equal(lock.packages['node_modules/fast-uri'].version, '3.1.8');
+    assert.equal(lock.packages['node_modules/fast-uri'].version, '3.1.9');
+    assert.equal(lock.packages['node_modules/node-gyp/node_modules/undici'].version, '6.29.1');
     assert.equal(applyToolchainPatch(), 'already applied');
 });
 
